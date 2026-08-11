@@ -39,3 +39,12 @@ def test_allowlist_claims_and_recovers_existing_owner() -> None:
     bot.handle_claim(99, 42, "/claim")
     assert bot.is_owner(42)
     assert any("reassigned" in message for _, message in bot.messages)
+
+
+def test_media_update_without_text_reaches_attachment_handler() -> None:
+    bot = make_bot("42")
+    attachments = []
+    bot.is_owner = lambda user_id: user_id == 42
+    bot.handle_attachment = lambda chat_id, user_id, message: attachments.append((chat_id, user_id, message))
+    bot.handle_update({"message": {"chat": {"id": 99, "type": "private"}, "from": {"id": 42}, "photo": [{"file_id": "x"}]}})
+    assert attachments == [(99, 42, {"chat": {"id": 99, "type": "private"}, "from": {"id": 42}, "photo": [{"file_id": "x"}]})]

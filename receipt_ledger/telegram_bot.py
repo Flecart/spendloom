@@ -131,7 +131,7 @@ class TelegramBot:
         if chat.get("type") != "private" or not chat_id or not user_id:
             return
         text = (message.get("text") or "").strip()
-        if text.split(maxsplit=1)[0] == "/id":
+        if text.split(maxsplit=1)[:1] == ["/id"]:
             self.send(chat_id, f"Your Telegram user ID is: {user_id}")
             return
         if text.startswith("/claim"):
