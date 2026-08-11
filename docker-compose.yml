@@ -1,0 +1,49 @@
+services:
+  web:
+    build: .
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    env_file: ${ENV_FILE:-.env}
+    environment:
+      DATA_DIR: /data
+      DATABASE_URL: sqlite:////data/receipt-ledger.db
+    ports:
+      - "${SPENDLOOM_PORT:-8080}:8080"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build: .
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    command: ["python", "-m", "receipt_ledger.worker"]
+    env_file: ${ENV_FILE:-.env}
+    environment:
+      DATA_DIR: /data
+      DATABASE_URL: sqlite:////data/receipt-ledger.db
+    volumes:
+      - ./data:/data
+    depends_on:
+      web:
+        condition: service_healthy
+
+  telegram:
+    profiles: ["telegram"]
+    build: .
+    restart: unless-stopped
+    user: "${PUID:-1000}:${PGID:-1000}"
+    command: ["python", "-m", "receipt_ledger.telegram_bot"]
+    env_file: ${ENV_FILE:-.env}
+    environment:
+      DATA_DIR: /data
+      DATABASE_URL: sqlite:////data/receipt-ledger.db
+    volumes:
+      - ./data:/data
+    depends_on:
+      web:
+        condition: service_healthy
