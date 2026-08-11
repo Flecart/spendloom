@@ -1,0 +1,22 @@
+name: Bug report
+description: Report a reproducible Spendloom problem without private financial data.
+body:
+  - type: markdown
+    attributes:
+      value: Never attach receipts, databases, API keys, Telegram tokens, or screenshots containing financial data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Safe reproduction steps
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Spendloom version and deployment method
