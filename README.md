@@ -39,7 +39,7 @@ Read the [architecture notes](docs/architecture.md) for the receipt lifecycle, f
 On Ubuntu/Debian/Mint, Fedora/RHEL/Rocky/Alma, or Arch/Manjaro:
 
 ```bash
-git clone <your-fork-or-clone-url> spendloom
+git clone https://github.com/Flecart/spendloom.git spendloom
 cd spendloom
 ./install.sh
 ```
