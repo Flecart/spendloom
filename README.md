@@ -28,6 +28,8 @@ Set `AI_PROVIDER`, `AI_MODEL`, and its matching API key. `CHAT_MODEL` is optiona
 
 After claiming the private bot, send a receipt and then write: “make that business”, “what did I spend on travel in July?”, or “export this year”. Spendloom retains at most eight user/assistant exchanges for 24 hours. `/new` clears that context and `/context` shows the active receipt and retained count. Deleting, archiving, replacing, and bulk changes always require a one-use Confirm/Cancel button that expires after ten minutes.
 
+For the strongest single-user setup, send `/id` to the bot, put the returned numeric value in `TELEGRAM_ALLOWED_USER_ID` in `.env`, then restart the Telegram service with `docker compose --profile telegram up -d --force-recreate telegram`. That allowlist is checked on every message and button callback, so no other Telegram account can claim or use the bot, even if it knows a claim code. It also lets the configured account reclaim a copied database with a stale bot owner.
+
 ## Architecture and privacy
 
 The web service accepts files and runs migrations, the worker performs extraction and chat jobs, and the optional Telegram service talks directly to Telegram. They share a local SQLite database and `/data` receipt store. The model receives only bounded conversation history and data returned by explicitly requested, server-validated tools; it never receives SQL access.

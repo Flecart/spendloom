@@ -144,7 +144,7 @@ This is an at-least-once intake design with idempotency at the application bound
 
 - The web application uses an Argon2-hashed password and a signed, strict same-site session cookie.
 - Login attempts are rate-limited in memory per client address.
-- The Telegram bot accepts private chats only. A one-time claim code binds it to one numeric Telegram user ID.
+- The Telegram bot accepts private chats only. A one-time claim code binds it to one numeric Telegram user ID; `TELEGRAM_ALLOWED_USER_ID` can additionally make one configured account authoritative for every message, callback, claim, and owner recovery.
 - File type is checked from content rather than trusting its extension.
 - API keys and the bot token live in server environment variables and are never sent to the browser.
 - Containers run with the host's configured unprivileged `PUID` and `PGID`.

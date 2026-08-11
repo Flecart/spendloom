@@ -514,6 +514,7 @@ def get_app_settings(_auth: Auth, db: Db) -> SettingsOut:
         confidence_threshold=float(values.get("confidence_threshold", settings.confidence_threshold)),
         telegram_claim_code=values.get("telegram_claim_code", ""),
         telegram_claimed=bool(values.get("telegram_owner_id")),
+        telegram_allowlist_configured=bool(settings.telegram_allowed_user_id),
         ai_provider=settings.ai_provider,
         ai_model=settings.ai_model,
         ai_configured=_ai_configured(),

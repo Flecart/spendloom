@@ -30,6 +30,9 @@ class Settings(BaseSettings):
     gemini_api_key: str | None = None
 
     telegram_bot_token: str | None = None
+    # Optional defence in depth: only this private Telegram account may claim
+    # or use the bot.  It is intentionally configuration, not browser state.
+    telegram_allowed_user_id: str | None = None
     telegram_poll_timeout: int = 30
 
     cookie_secure: bool = False

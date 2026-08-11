@@ -131,6 +131,9 @@ class TelegramBot:
         if chat.get("type") != "private" or not chat_id or not user_id:
             return
         text = (message.get("text") or "").strip()
+        if text.split(maxsplit=1)[0] == "/id":
+            self.send(chat_id, f"Your Telegram user ID is: {user_id}")
+            return
         if text.startswith("/claim"):
             self.handle_claim(chat_id, user_id, text)
             return
@@ -177,20 +180,52 @@ class TelegramBot:
         self.send(chat_id, result)
 
     def is_owner(self, user_id: int) -> bool:
+        if not self.is_allowed_user(user_id):
+            return False
         with SessionLocal() as db:
             owner = db.get(AppSetting, "telegram_owner_id")
             return bool(owner and secrets.compare_digest(owner.value, str(user_id)))
 
+    def is_allowed_user(self, user_id: int) -> bool:
+        allowed = (self.settings.telegram_allowed_user_id or "").strip()
+        return not allowed or secrets.compare_digest(allowed.strip(), str(user_id))
+
     def handle_claim(self, chat_id: int, user_id: int, text: str) -> None:
         supplied = text.partition(" ")[2].strip().upper()
+        if not self.is_allowed_user(user_id):
+            self.send(chat_id, "This bot is restricted to its configured Telegram account.")
+            return
         with SessionLocal.begin() as db:
             owner = db.get(AppSetting, "telegram_owner_id")
             claim = db.get(AppSetting, "telegram_claim_code")
             if owner:
-                self.send(chat_id, "This receipt bot has already been claimed.")
+                # An explicit allowlist is authoritative. This also recovers a
+                # database copied from a host where the bot was claimed by the
+                # wrong account; no unlisted Telegram account can trigger it.
+                if self.settings.telegram_allowed_user_id and not secrets.compare_digest(owner.value, str(user_id)):
+                    owner.value = str(user_id)
+                    if claim:
+                        claim.value = secrets.token_hex(3).upper()
+                    else:
+                        db.add(AppSetting(key="telegram_claim_code", value=secrets.token_hex(3).upper()))
+                    self.send(chat_id, "Spendloom access has been reassigned to your allowlisted Telegram account.")
+                    return
+                self.send(chat_id, "This Spendloom bot has already been claimed.")
+                return
+            # A configured Telegram ID is stronger than a shareable setup code:
+            # Telegram authenticates the sender ID for every update, and this
+            # branch never accepts another account's claim even if it learns a
+            # stale claim code.
+            if self.settings.telegram_allowed_user_id:
+                db.add(AppSetting(key="telegram_owner_id", value=str(user_id)))
+                if claim:
+                    claim.value = secrets.token_hex(3).upper()
+                else:
+                    db.add(AppSetting(key="telegram_claim_code", value=secrets.token_hex(3).upper()))
+                self.send(chat_id, "Spendloom is linked to your allowlisted Telegram account.")
                 return
             if not supplied or not claim or not secrets.compare_digest(supplied, claim.value.upper()):
-                self.send(chat_id, "Invalid claim code.")
+                self.send(chat_id, "Invalid claim code. Get the current code from Spendloom Settings → Telegram, or configure TELEGRAM_ALLOWED_USER_ID and send /claim.")
                 return
             db.add(AppSetting(key="telegram_owner_id", value=str(user_id)))
             claim.value = secrets.token_hex(3).upper()

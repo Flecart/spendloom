@@ -201,6 +201,7 @@ class SettingsOut(BaseModel):
     confidence_threshold: float
     telegram_claim_code: str
     telegram_claimed: bool
+    telegram_allowlist_configured: bool
     ai_provider: str
     ai_model: str
     ai_configured: bool

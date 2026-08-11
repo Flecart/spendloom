@@ -41,6 +41,7 @@ CHAT_MODEL=$(ask CHAT_MODEL "Optional chat model (blank reuses receipt model)" "
 API_KEY_NAME=$(tr '[:lower:]' '[:upper:]' <<<"$AI_PROVIDER")_API_KEY
 AI_KEY=$(ask "$API_KEY_NAME" "$API_KEY_NAME (blank keeps receipt processing in manual review)" "" 1)
 TELEGRAM_BOT_TOKEN=$(ask TELEGRAM_BOT_TOKEN "Optional Telegram bot token" "" 1)
+TELEGRAM_ALLOWED_USER_ID=$(ask TELEGRAM_ALLOWED_USER_ID "Optional strict Telegram user ID (message /id to the bot first)" "")
 PORT=$(ask SPENDLOOM_PORT "Local web port" "8080")
 [[ $PORT =~ ^[0-9]{1,5}$ ]] && ((PORT > 0 && PORT < 65536)) || die "Port must be 1–65535."
 if port_in_use "$PORT" && [[ -z $(docker compose -f "$ROOT_DIR/docker-compose.yml" ps -q web 2>/dev/null) ]]; then
@@ -57,6 +58,7 @@ env_set "$ENV_FILE" AI_MODEL "$AI_MODEL"
 env_set "$ENV_FILE" CHAT_MODEL "$CHAT_MODEL"
 env_set "$ENV_FILE" "$API_KEY_NAME" "$AI_KEY"
 env_set "$ENV_FILE" TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
+env_set "$ENV_FILE" TELEGRAM_ALLOWED_USER_ID "$TELEGRAM_ALLOWED_USER_ID"
 env_set "$ENV_FILE" APP_ORIGIN "$APP_ORIGIN"
 env_set "$ENV_FILE" PUID "$PUID"
 env_set "$ENV_FILE" PGID "$PGID"
