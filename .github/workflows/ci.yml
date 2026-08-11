@@ -27,7 +27,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: docker compose config
+      - run: ENV_FILE=.env.example docker compose config
       - run: docker build -t spendloom:ci .
       - uses: returntocorp/semgrep-action@v1
         with: { config: p/default }
