@@ -32,4 +32,4 @@ jobs:
       - uses: returntocorp/semgrep-action@v1
         with: { config: p/default }
       - uses: aquasecurity/trivy-action@v0.36.0
-        with: { image-ref: spendloom:ci, severity: CRITICAL,HIGH, exit-code: '1' }
+        with: { image-ref: spendloom:ci, severity: 'CRITICAL,HIGH', exit-code: '1' }
