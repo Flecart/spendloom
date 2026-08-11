@@ -99,14 +99,35 @@ class TelegramBot:
                     "allowed_updates": ["message", "callback_query"],
                 })
                 for update in updates:
-                    self.handle_update(update)
-                    self.save_offset(int(update["update_id"]) + 1)
+                    self.process_update(update)
             except httpx.HTTPError:
                 logger.warning("Telegram connection failed; retrying")
                 time.sleep(5)
             except Exception:
                 logger.exception("Telegram polling loop failed; retrying")
                 time.sleep(5)
+
+    def process_update(self, update: dict) -> None:
+        """Contain a bad update so it cannot replay forever or stop the bot."""
+        try:
+            self.handle_update(update)
+        except Exception:
+            logger.exception("Telegram update failed")
+            chat_id = self.update_chat_id(update)
+            if chat_id:
+                self.send(chat_id, "Sorry — Spendloom hit an error while handling that message. Please try again.")
+        finally:
+            # Telegram replays an update until its offset advances. Save it even
+            # after an application error, otherwise one malformed update can
+            # prevent every later message from being handled.
+            update_id = update.get("update_id")
+            if isinstance(update_id, int):
+                self.save_offset(update_id + 1)
+
+    @staticmethod
+    def update_chat_id(update: dict) -> int | str | None:
+        source = update.get("message") or update.get("callback_query", {}).get("message") or {}
+        return (source.get("chat") or {}).get("id")
 
     def save_offset(self, offset: int) -> None:
         with SessionLocal.begin() as db:

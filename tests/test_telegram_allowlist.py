@@ -48,3 +48,15 @@ def test_media_update_without_text_reaches_attachment_handler() -> None:
     bot.handle_attachment = lambda chat_id, user_id, message: attachments.append((chat_id, user_id, message))
     bot.handle_update({"message": {"chat": {"id": 99, "type": "private"}, "from": {"id": 42}, "photo": [{"file_id": "x"}]}})
     assert attachments == [(99, 42, {"chat": {"id": 99, "type": "private"}, "from": {"id": 42}, "photo": [{"file_id": "x"}]})]
+
+
+def test_failed_update_notifies_chat_and_advances_offset() -> None:
+    bot = make_bot("42")
+    saved_offsets = []
+    bot.handle_update = lambda _update: (_ for _ in ()).throw(RuntimeError("broken update"))
+    bot.save_offset = saved_offsets.append
+
+    bot.process_update({"update_id": 12, "message": {"chat": {"id": 99, "type": "private"}}})
+
+    assert saved_offsets == [13]
+    assert bot.messages == [(99, "Sorry — Spendloom hit an error while handling that message. Please try again.")]
