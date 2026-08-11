@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">Spendloom woven receipt mark</title>
+  <rect width="256" height="256" rx="58" fill="#FBF3E7"/>
+  <path d="M61 45h134v151l-16-10-17 10-17-10-17 10-17-10-17 10-17-10-16 10V45Z" fill="#7A365D"/>
+  <path d="M82 83h92M82 113h92M82 143h56" stroke="#FBF3E7" stroke-width="13" stroke-linecap="round"/>
+  <path d="M76 62c20 14 34 14 52 0 18-14 34-14 52 0" fill="none" stroke="#D96A5C" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="169" cy="158" r="24" fill="#D96A5C"/><path d="m157 158 8 8 16-19" fill="none" stroke="#FFF9F0" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

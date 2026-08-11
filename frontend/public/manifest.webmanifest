@@ -1,0 +1,16 @@
+{
+  "name": "Spendloom",
+  "short_name": "Spendloom",
+  "description": "Private receipt capture and thoughtful spending analysis",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#FBF3E7",
+  "theme_color": "#7A365D",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }],
+  "share_target": {
+    "action": "/",
+    "method": "GET",
+    "enctype": "application/x-www-form-urlencoded",
+    "params": { "title": "title", "text": "text", "url": "url" }
+  }
+}

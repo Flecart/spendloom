@@ -1,0 +1,19 @@
+:root { font-family: Inter, ui-rounded, "SF Pro Rounded", system-ui, sans-serif; color: #33242b; background: #fbf3e7; font-synthesis: none; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; background: radial-gradient(circle at 92% 0%, #f6d8ce 0, transparent 32rem), #fbf3e7; }
+button, input { font: inherit; }
+.app-shell { min-height: 100vh; }
+.main-content { max-width: 1500px; margin: 0 auto; padding: 28px 32px 72px; }
+.page-title { font-weight: 780; letter-spacing: -0.04em; margin: 0; }
+.eyebrow { text-transform: uppercase; letter-spacing: .12em; font-weight: 700; font-size: .72rem; color: #7a365d; }
+.metric-card { overflow: hidden; position: relative; min-height: 145px; }
+.metric-card::after { content: ""; position: absolute; width: 110px; height: 110px; border-radius: 50%; right: -30px; top: -45px; background: rgba(122,54,93,.09); }
+.drop-zone { border: 2px dashed #d9b5ad; border-radius: 24px; padding: 36px; text-align: center; background: #fff8ee; transition: .2s ease; cursor: pointer; }
+.drop-zone:hover, .drop-zone.dragging { border-color: #7a365d; background: #f8e6dd; transform: translateY(-1px); }
+.receipt-preview { width: 100%; height: min(70vh, 760px); object-fit: contain; border-radius: 18px; background: #eeeaf2; }
+.status-dot { width: 8px; height: 8px; display: inline-block; border-radius: 50%; margin-right: 7px; }
+.empty-state { text-align: center; padding: 64px 20px; color: #6d6874; }
+@media (max-width: 760px) {
+  .main-content { padding: 20px 16px 92px; }
+  .desktop-only { display: none !important; }
+}
