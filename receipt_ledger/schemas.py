@@ -149,6 +149,10 @@ class ExpenseUpdate(BaseModel):
     remember_merchant: bool = False
 
 
+class ReimbursementExportRequest(BaseModel):
+    expense_ids: list[str] = Field(min_length=1, max_length=1000)
+
+
 class IngestionOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str

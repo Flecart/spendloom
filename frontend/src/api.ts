@@ -61,5 +61,29 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   return response.json();
 }
 
+export async function downloadReimbursementZip(expenseIds: string[]): Promise<void> {
+  const response = await fetch("/api/exports/reimbursement.zip", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ expense_ids: expenseIds }),
+  });
+  if (!response.ok) {
+    let message = response.statusText;
+    try { message = (await response.json()).detail || message; } catch { /* response is not JSON */ }
+    throw new Error(message);
+  }
+  const filename = response.headers.get("Content-Disposition")?.match(/filename="?([^";]+)"?/i)?.[1]
+    || "spendloom-reimbursement.zip";
+  const url = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 export const money = (value: string | number | null | undefined, currency = "EUR") =>
   new Intl.NumberFormat(undefined, { style: "currency", currency }).format(Number(value || 0));

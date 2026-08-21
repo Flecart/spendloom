@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import csv
 import io
+import re
 import secrets
 import time
+import zipfile
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
@@ -48,6 +50,7 @@ from .schemas import (
     PaymentMethodCreate,
     PaymentMethodOut,
     PaymentMethodUpdate,
+    ReimbursementExportRequest,
     SettingsOut,
     SettingsUpdate,
 )
@@ -645,6 +648,128 @@ RAMP_HEADERS = [
     "Refundable", "URL", "Receipt URL", "Memo", "QuickBooks Category", "QuickBooks Class", "QuickBooks Customer/Job",
     "QuickBooks Location", "QuickBooks Subprogram", "QuickBooks Vendor",
 ]
+
+REIMBURSEMENT_HEADERS = [
+    "Archive Filename", "Date", "Merchant", "Original Amount", "Original Currency",
+    "EUR Reimbursement Amount", "Category", "Payment Method", "Scope", "Department",
+    "Trip", "Memo", "Status",
+]
+
+
+def _safe_receipt_extension(receipt: Receipt) -> str:
+    """Return an archive-safe extension while retaining the original file type."""
+    suffix = Path(receipt.original_filename).suffix.lower()
+    extensions = {
+        "application/pdf": ({".pdf"}, ".pdf"),
+        "image/jpeg": ({".jpg", ".jpeg", ".jpe"}, ".jpg"),
+        "image/png": ({".png"}, ".png"),
+        "image/webp": ({".webp"}, ".webp"),
+        "image/heic": ({".heic"}, ".heic"),
+        "image/heif": ({".heif", ".heic"}, ".heif"),
+    }
+    allowed, fallback = extensions.get(receipt.mime_type.lower(), (set(), ".bin"))
+    return suffix if suffix in allowed else fallback
+
+
+def _safe_receipt_component(value: str | None, fallback: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9]+", "-", (value or "").strip()).strip("-")
+    return cleaned[:80] or fallback
+
+
+@app.post("/api/exports/reimbursement.zip")
+def export_reimbursement_zip(payload: ReimbursementExportRequest, _auth: Auth, db: Db) -> Response:
+    """Build a temporary reimbursement bundle from database-validated receipts."""
+    expense_ids = payload.expense_ids
+    if not expense_ids:
+        raise HTTPException(status_code=422, detail="Select at least one expense to export")
+    if len(set(expense_ids)) != len(expense_ids):
+        raise HTTPException(status_code=422, detail="Expense IDs must be unique")
+
+    expenses = db.scalars(
+        select(Expense)
+        .options(joinedload(Expense.category), joinedload(Expense.payment_method))
+        .where(Expense.id.in_(expense_ids), Expense.deleted_at.is_(None))
+    ).unique().all()
+    expenses_by_id = {expense.id: expense for expense in expenses}
+    missing_ids = [expense_id for expense_id in expense_ids if expense_id not in expenses_by_id]
+    if missing_ids:
+        raise HTTPException(status_code=422, detail="One or more selected expenses do not exist or have been deleted")
+
+    ingestions = db.scalars(
+        select(Ingestion)
+        .options(joinedload(Ingestion.receipt))
+        .where(Ingestion.expense_id.in_(expense_ids))
+        .order_by(Ingestion.received_at.desc())
+    ).unique().all()
+    ingestions_by_expense: dict[str, Ingestion] = {}
+    for ingestion in ingestions:
+        if ingestion.expense_id and ingestion.expense_id not in ingestions_by_expense:
+            ingestions_by_expense[ingestion.expense_id] = ingestion
+
+    selected = [(expenses_by_id[expense_id], ingestions_by_expense.get(expense_id)) for expense_id in expense_ids]
+    for expense, ingestion in selected:
+        if not ingestion or not ingestion.receipt:
+            raise HTTPException(status_code=422, detail=f"Selected expense {expense.id} does not have a receipt")
+        if expense.amount is None or expense.currency.upper() != "EUR":
+            raise HTTPException(status_code=422, detail=f"Selected expense {expense.id} does not have a normalized EUR amount")
+        if not Path(ingestion.receipt.storage_path).is_file():
+            raise HTTPException(status_code=422, detail=f"Receipt file for selected expense {expense.id} is missing")
+
+    csv_stream = io.StringIO()
+    writer = csv.DictWriter(csv_stream, fieldnames=REIMBURSEMENT_HEADERS)
+    writer.writeheader()
+    original_totals: defaultdict[str, Decimal] = defaultdict(Decimal)
+    eur_total = Decimal("0")
+
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        for sequence, (expense, ingestion) in enumerate(selected, start=1):
+            receipt = ingestion.receipt
+            archive_filename = (
+                f"receipts/{sequence:03d}_{expense.expense_date.isoformat() if expense.expense_date else 'undated'}_"
+                f"{_safe_receipt_component(expense.merchant, 'unknown-merchant')}{_safe_receipt_extension(receipt)}"
+            )
+            bundle.write(receipt.storage_path, archive_filename)
+            writer.writerow({
+                "Archive Filename": archive_filename,
+                "Date": expense.expense_date.isoformat() if expense.expense_date else "",
+                "Merchant": expense.merchant or "",
+                "Original Amount": str(expense.original_amount) if expense.original_amount is not None else "",
+                "Original Currency": expense.original_currency or "",
+                "EUR Reimbursement Amount": str(expense.amount),
+                "Category": expense.category.name if expense.category else "",
+                "Payment Method": expense.payment_method.name if expense.payment_method else "",
+                "Scope": expense.scope.value,
+                "Department": expense.department or "",
+                "Trip": expense.trip_name or "",
+                "Memo": expense.memo or "",
+                "Status": expense.status.value,
+            })
+            eur_total += Decimal(expense.amount)
+            if expense.original_amount is not None and expense.original_currency:
+                original_totals[expense.original_currency.upper()] += Decimal(expense.original_amount)
+
+        summary_lines = [
+            "Spendloom reimbursement export",
+            f"Created: {date.today().isoformat()}",
+            f"Selected receipt count: {len(selected)}",
+            f"Total EUR reimbursement amount: {eur_total:.2f} EUR",
+            "",
+            "Original-currency subtotals:",
+        ]
+        if original_totals:
+            summary_lines.extend(f"{currency}: {total:.2f}" for currency, total in sorted(original_totals.items()))
+        else:
+            summary_lines.append("No original-currency amounts available.")
+        bundle.writestr("reimbursement.csv", csv_stream.getvalue())
+        bundle.writestr("summary.txt", "\n".join(summary_lines) + "\n")
+
+    filename = f"spendloom-reimbursement-{date.today().isoformat()}.zip"
+    return Response(
+        archive.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.get("/api/exports/expenses.csv")
