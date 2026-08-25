@@ -6,7 +6,7 @@ license = "GPL-3.0-only"
 requires-python = ">=3.11"
 dependencies = [
   "alembic>=1.16,<2",
-  "anthropic>=0.64,<1",
+  "anthropic>=0.64,<2",
   "argon2-cffi>=25,<26",
   "fastapi>=0.141,<0.142",
   "google-genai>=1.30,<2",
