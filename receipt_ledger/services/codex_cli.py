@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -9,6 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from ..config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 class CodexNotConfigured(RuntimeError):
@@ -127,6 +130,13 @@ def run_codex(
             args.extend(["--image", *(str(path) for path in image_paths)])
         args.append("-")
 
+        logger.info(
+            "Invoking Codex model %s with %d image attachment(s) totaling %d bytes",
+            model,
+            len(image_paths),
+            sum(path.stat().st_size for path in image_paths),
+        )
+
         try:
             result = subprocess.run(
                 args,
@@ -140,16 +150,26 @@ def run_codex(
             )
         except subprocess.TimeoutExpired as exc:
             raise CodexInvocationError(
-                f"Codex did not respond within {settings.codex_timeout_seconds} seconds"
+                f"Codex did not respond within {settings.codex_timeout_seconds} seconds "
+                f"while processing {len(image_paths)} image attachment(s)"
             ) from exc
 
         if result.returncode != 0:
             detail = _last_error_line(result.stderr)
+            logger.error(
+                "Codex exited with status %d while processing %d image attachment(s): %s",
+                result.returncode,
+                len(image_paths),
+                detail,
+            )
             raise CodexInvocationError(
                 f"Codex exited with status {result.returncode}: {detail}"
             )
         if not output_path.is_file():
-            raise CodexInvocationError("Codex returned no structured output")
+            raise CodexInvocationError(
+                "Codex returned no structured output after processing "
+                f"{len(image_paths)} image attachment(s)"
+            )
         try:
             value = json.loads(output_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:

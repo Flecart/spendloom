@@ -100,28 +100,89 @@ def test_migration_backfills_primary_documents(tmp_path: Path) -> None:
             },
         )
 
+    command.upgrade(config, "0003_multi_document_receipts")
+
+    missing_received_at = "2026-08-27 22:46:33.000000"
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO receipts "
+                "(id, sha256, original_filename, mime_type, size_bytes, storage_path, preview_path, page_count, created_at) "
+                "VALUES (:id, :sha256, :filename, :mime, :size, :path, NULL, :pages, :created)"
+            ),
+            {
+                "id": "mixed-deployment-receipt",
+                "sha256": "b" * 64,
+                "filename": "telegram-mixed.jpg",
+                "mime": "image/jpeg",
+                "size": 14,
+                "path": "/tmp/telegram-mixed.jpg",
+                "pages": 1,
+                "created": missing_received_at,
+            },
+        )
+        connection.execute(
+            text(
+                "INSERT INTO ingestions "
+                "(id, receipt_id, expense_id, source, external_id, source_user_id, source_chat_id, caption, status, attempts, error_code, error_message, provider, model, raw_extraction, received_at, processed_at, notification_sent_at) "
+                "VALUES (:id, :receipt, NULL, :source, :external, NULL, NULL, NULL, :status, 3, :error_code, :error_message, NULL, NULL, NULL, :received, :received, NULL)"
+            ),
+            {
+                "id": "mixed-deployment-ingestion",
+                "receipt": "mixed-deployment-receipt",
+                "source": "telegram",
+                "external": "telegram-mixed-upload",
+                "status": "failed",
+                "error_code": "invalid_document",
+                "error_message": "Receipt has no stored documents",
+                "received": missing_received_at,
+            },
+        )
+
     command.upgrade(config, "head")
 
     with engine.connect() as connection:
-        row = connection.execute(
+        rows = connection.execute(
             text(
                 "SELECT ingestion_id, receipt_id, position, source, external_id, caption "
-                "FROM ingestion_documents"
+                "FROM ingestion_documents ORDER BY ingestion_id"
+            )
+        ).all()
+        repaired = connection.execute(
+            text(
+                "SELECT status, attempts, error_code, error_message, processed_at "
+                "FROM ingestions WHERE id = 'mixed-deployment-ingestion'"
             )
         ).one()
-    assert tuple(row) == (
-        "migration-ingestion",
-        "migration-receipt",
-        0,
-        "web",
-        "legacy-upload",
-        "legacy caption",
-    )
+    assert [tuple(row) for row in rows] == [
+        (
+            "migration-ingestion",
+            "migration-receipt",
+            0,
+            "web",
+            "legacy-upload",
+            "legacy caption",
+        ),
+        (
+            "mixed-deployment-ingestion",
+            "mixed-deployment-receipt",
+            0,
+            "telegram",
+            "telegram-mixed-upload",
+            None,
+        ),
+    ]
+    assert tuple(repaired) == ("queued", 0, None, None, None)
 
 
 class RecordingProvider:
-    def __init__(self, category_code: str) -> None:
+    def __init__(
+        self,
+        category_code: str,
+        expense_date: str = "2026-08-20",
+    ) -> None:
         self.category_code = category_code
+        self.expense_date = expense_date
         self.image_count = 0
         self.prompt = ""
 
@@ -129,7 +190,7 @@ class RecordingProvider:
         self.prompt = prompt
         self.image_count = len(images)
         return ReceiptExtraction(
-            expense_date="2026-08-20",
+            expense_date=self.expense_date,
             merchant="Grouped Merchant",
             original_amount="12.00",
             original_currency="EUR",
@@ -184,6 +245,38 @@ def test_grouped_documents_are_extracted_into_one_expense(monkeypatch) -> None:
         assert "Document 2: Back" in provider.prompt
         assert result.expense_id is not None
         assert db.get(Expense, result.expense_id).merchant == "Grouped Merchant"
+
+
+def test_processing_repairs_legacy_ingestion_without_document_link(
+    monkeypatch,
+) -> None:
+    startup()
+    settings = get_settings()
+    with SessionLocal() as db:
+        category = db.scalar(select(Category).order_by(Category.code))
+        provider = RecordingProvider(category.code)
+        monkeypatch.setattr(
+            "receipt_ledger.services.processing.provider_for",
+            lambda _settings: provider,
+        )
+        ingestion = ingest_bytes(
+            db,
+            settings,
+            data=jpeg("chartreuse"),
+            filename="legacy-telegram.jpg",
+            claimed_mime="image/jpeg",
+            source="telegram",
+            external_id="legacy-telegram-without-document-link",
+        )
+        for document in ingestion_documents(db, ingestion.id):
+            db.delete(document)
+        db.commit()
+
+        result = process_ingestion(db, settings, ingestion.id)
+
+        assert result.error_code is None
+        assert result.expense_id is not None
+        assert len(ingestion_documents(db, ingestion.id)) == 1
 
 
 def test_web_upload_can_group_files_or_keep_them_separate() -> None:
@@ -280,6 +373,39 @@ def test_reprocessing_fills_gaps_without_replacing_existing_values(monkeypatch) 
         assert expense.location == "London"
         assert expense.memo == "Combined documents"
         assert expense.status == IngestionStatus.needs_review
+
+
+def test_receipt_more_than_two_weeks_old_automatically_needs_review(
+    monkeypatch,
+) -> None:
+    startup()
+    settings = get_settings()
+    with SessionLocal() as db:
+        category = db.scalar(select(Category).order_by(Category.code))
+        provider = RecordingProvider(category.code, expense_date="2026-08-12")
+        monkeypatch.setattr(
+            "receipt_ledger.services.processing.provider_for",
+            lambda _settings: provider,
+        )
+        ingestion = ingest_bytes(
+            db,
+            settings,
+            data=jpeg("indigo"),
+            filename="old-receipt.jpg",
+            claimed_mime="image/jpeg",
+            source="web",
+            external_id="old-receipt-document",
+        )
+        ingestion.received_at = datetime(2026, 8, 27, 12, tzinfo=timezone.utc)
+        db.commit()
+
+        result = process_ingestion(db, settings, ingestion.id)
+        expense = db.get(Expense, result.expense_id)
+
+        assert expense is not None
+        assert expense.expense_date == date(2026, 8, 12)
+        assert expense.status == IngestionStatus.needs_review
+        assert result.status == IngestionStatus.needs_review
 
 
 def test_receipt_grouping_choice_merges_without_clearing_context() -> None:

@@ -38,6 +38,47 @@ def ingestion_documents(db: Session, ingestion_id: str) -> list[IngestionDocumen
     )
 
 
+def ensure_ingestion_documents(
+    db: Session,
+    ingestion: Ingestion,
+) -> list[IngestionDocument]:
+    """Repair an ingestion written by a pre-multi-document service instance."""
+    documents = ingestion_documents(db, ingestion.id)
+    if documents:
+        return documents
+    if not db.get(Receipt, ingestion.receipt_id):
+        return []
+
+    db.add(
+        IngestionDocument(
+            ingestion_id=ingestion.id,
+            receipt_id=ingestion.receipt_id,
+            position=0,
+            source=ingestion.source,
+            external_id=ingestion.external_id,
+            caption=ingestion.caption,
+            received_at=ingestion.received_at,
+        )
+    )
+    db.add(
+        AuditEvent(
+            entity_type="ingestion",
+            entity_id=ingestion.id,
+            action="legacy_document_repaired",
+            details={"receipt_id": ingestion.receipt_id},
+        )
+    )
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        documents = ingestion_documents(db, ingestion.id)
+        if documents:
+            return documents
+        raise
+    return ingestion_documents(db, ingestion.id)
+
+
 def canonical_ingestion(db: Session, ingestion: Ingestion) -> Ingestion:
     current = ingestion
     visited = {current.id}

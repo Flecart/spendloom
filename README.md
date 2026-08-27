@@ -10,6 +10,7 @@ Spendloom is a private, self-hosted receipt inbox and spending companion for one
 
 - Capture JPEG, PNG, WebP, HEIC, and PDF receipts from the web or Telegram.
 - Keep front/back images, supporting slips, or separate pages together as one receipt and one expense.
+- Automatically require review when a receipt date is more than two weeks older than its upload date.
 - Choose OpenAI, Anthropic, Gemini, or ChatGPT subscription access through the Codex CLI for receipt extraction and Telegram conversation; provider switches do not lose local chat context.
 - Review uncertain records, remember merchant rules, normalise to EUR, and export Ramp-shaped CSV.
 - Ask Telegram to find, total, create, or correct expenses. Calculations and database writes stay on the server.

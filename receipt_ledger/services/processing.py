@@ -21,12 +21,15 @@ from ..models import (
     PaymentMethod,
 )
 from ..schemas import ReceiptExtraction
+from .codex_cli import CodexInvocationError
 from .extraction import ProviderNotConfigured, build_prompt, provider_for
 from .fx import get_eur_rate
-from .ingestion import ingestion_documents
+from .ingestion import ensure_ingestion_documents
 from .storage import InvalidReceiptFile, prepare_visuals
 
 logger = logging.getLogger(__name__)
+
+RECEIPT_AGE_REVIEW_DAYS = 14
 
 
 def normalize_merchant(value: str | None) -> str | None:
@@ -65,6 +68,19 @@ def parse_date(value: str | None) -> date | None:
         return date.fromisoformat(value[:10])
     except ValueError:
         return None
+
+
+def receipt_is_older_than_review_window(
+    expense_date: date | None,
+    received_at: datetime,
+) -> bool:
+    """Flag dates before the 14-day upload window using calendar days."""
+    if expense_date is None:
+        return False
+    oldest_unflagged_date = received_at.date() - timedelta(
+        days=RECEIPT_AGE_REVIEW_DAYS,
+    )
+    return expense_date < oldest_unflagged_date
 
 
 def get_setting(db: Session, key: str, default: str = "") -> str:
@@ -112,7 +128,7 @@ def process_ingestion(db: Session, settings: Settings, ingestion_id: str) -> Ing
     db.commit()
 
     try:
-        documents = ingestion_documents(db, ingestion.id)
+        documents = ensure_ingestion_documents(db, ingestion)
         if not documents:
             raise InvalidReceiptFile("Receipt has no stored documents")
         images: list[tuple[bytes, str]] = []
@@ -145,6 +161,14 @@ def process_ingestion(db: Session, settings: Settings, ingestion_id: str) -> Ing
         combined_caption = "\n".join(captions) or ingestion.caption
         combined_text = "\n\n".join(embedded_sections)
         prompt = build_prompt(prompt_categories, combined_caption, combined_text)
+        logger.info(
+            "Processing ingestion %s with %d document(s), %d rendered page(s), "
+            "and %d model attachment(s)",
+            ingestion.id,
+            len(documents),
+            total_pages,
+            len(images),
+        )
         extracted = provider_for(settings).extract(prompt, images)
         ingestion.raw_extraction = extracted.model_dump(mode="json")
         _create_expense(db, settings, ingestion, extracted, categories)
@@ -163,21 +187,22 @@ def process_ingestion(db: Session, settings: Settings, ingestion_id: str) -> Ing
             confidence=0,
         ), [])
     except InvalidReceiptFile as exc:
+        logger.warning(
+            "Receipt document validation failed for ingestion %s: %s",
+            ingestion.id,
+            exc,
+        )
         ingestion.status = IngestionStatus.failed
         ingestion.error_code = "invalid_document"
         ingestion.error_message = str(exc)
         ingestion.processed_at = datetime.now(timezone.utc)
         db.commit()
+    except CodexInvocationError as exc:
+        logger.error("Codex processing failed for ingestion %s: %s", ingestion.id, exc)
+        _record_retryable_failure(db, ingestion, "codex_invocation_error", str(exc))
     except Exception as exc:  # worker boundary: retain the job and a sanitized error
         logger.exception("Receipt processing failed for ingestion %s", ingestion.id)
-        ingestion.error_code = "processing_error"
-        ingestion.error_message = str(exc)[:500]
-        if ingestion.attempts >= 3:
-            ingestion.status = IngestionStatus.failed
-            ingestion.processed_at = datetime.now(timezone.utc)
-        else:
-            ingestion.status = IngestionStatus.queued
-        db.commit()
+        _record_retryable_failure(db, ingestion, "processing_error", str(exc))
     db.refresh(ingestion)
     if ingestion.reprocess_requested and ingestion.status != IngestionStatus.failed:
         ingestion.reprocess_requested = False
@@ -187,6 +212,22 @@ def process_ingestion(db: Session, settings: Settings, ingestion_id: str) -> Ing
         db.commit()
         db.refresh(ingestion)
     return ingestion
+
+
+def _record_retryable_failure(
+    db: Session,
+    ingestion: Ingestion,
+    error_code: str,
+    error_message: str,
+) -> None:
+    ingestion.error_code = error_code
+    ingestion.error_message = error_message[:500]
+    if ingestion.attempts >= 3:
+        ingestion.status = IngestionStatus.failed
+        ingestion.processed_at = datetime.now(timezone.utc)
+    else:
+        ingestion.status = IngestionStatus.queued
+    db.commit()
 
 
 def _create_expense(
@@ -244,6 +285,9 @@ def _create_expense(
         status = IngestionStatus.accepted
     else:
         status = IngestionStatus.accepted if required_complete and extracted.confidence >= threshold else IngestionStatus.needs_review
+
+    if receipt_is_older_than_review_window(expense_date, ingestion.received_at):
+        status = IngestionStatus.needs_review
 
     existing_expense = db.get(Expense, ingestion.expense_id) if ingestion.expense_id else None
     duplicate_match = None
