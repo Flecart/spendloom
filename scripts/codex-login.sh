@@ -38,7 +38,7 @@ else
   chmod 700 "$CODEX_AUTH_DIR"
 fi
 
-COMPOSE=(docker compose --env-file "$ENV_FILE")
+COMPOSE=(sudo docker compose --env-file "$ENV_FILE")
 "${COMPOSE[@]}" build worker
 "${COMPOSE[@]}" run --rm --no-deps --entrypoint sh worker -c \
   'mkdir -p /codex/log && test -w /codex && test -w /codex/log' \
