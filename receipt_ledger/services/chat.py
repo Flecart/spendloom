@@ -35,7 +35,7 @@ from ..models import (
     PaymentMethod,
     PendingAction,
 )
-from .codex_cli import run_codex
+from .codex_cli import CodexNotConfigured, run_codex
 from .fx import get_eur_rate
 from .processing import normalize_merchant, parse_date, parse_decimal
 
@@ -773,6 +773,13 @@ def process_chat_job(db: Session, settings: Settings, job_id: str) -> ChatJob | 
         job.status = "completed"; job.processed_at = datetime.now(timezone.utc)
         db.add(ConversationMessage(session_id=job.session_id, role="assistant", content=job.response_text, approximate_tokens=_tokens(job.response_text)))
         trim_history(db, job.session_id); db.commit(); db.refresh(job)
+    except CodexNotConfigured as exc:
+        logger.error("Chat AI is not configured: %s", exc)
+        job.error_message = str(exc)[:500]
+        job.status = "failed"
+        job.response_text = "AI access is not configured on the worker. Please check the server setup."
+        job.processed_at = datetime.now(timezone.utc)
+        db.commit()
     except Exception as exc:
         logger.exception("Chat job %s failed", job.id)
         job.error_message = str(exc)[:500]

@@ -24,6 +24,23 @@ def codex_auth_configured(settings: Settings) -> bool:
     return (settings.codex_home / "auth.json").is_file()
 
 
+def validate_codex_runtime(settings: Settings) -> str | None:
+    if settings.ai_provider.lower() != "codex":
+        return None
+    command = shutil.which(settings.codex_command)
+    if not command:
+        raise CodexNotConfigured(
+            f"Codex CLI command {settings.codex_command!r} is not installed in the worker; "
+            "rebuild and recreate the worker container"
+        )
+    if not codex_auth_configured(settings):
+        raise CodexNotConfigured(
+            "ChatGPT login is not configured; run "
+            "`docker compose run --rm --no-deps worker codex login --device-auth`"
+        )
+    return command
+
+
 def strict_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Make object shapes explicit for Codex structured final output."""
     value = json.loads(json.dumps(schema))
@@ -53,16 +70,9 @@ def run_codex(
     output_schema: dict[str, Any],
     images: list[tuple[bytes, str]] | None = None,
 ) -> dict[str, Any]:
-    command = shutil.which(settings.codex_command)
+    command = validate_codex_runtime(settings)
     if not command:
-        raise CodexNotConfigured(
-            f"Codex CLI command {settings.codex_command!r} is not installed in the worker"
-        )
-    if not codex_auth_configured(settings):
-        raise CodexNotConfigured(
-            "ChatGPT login is not configured; run "
-            "`docker compose run --rm worker codex login --device-auth`"
-        )
+        raise CodexNotConfigured("Codex CLI is unavailable")
 
     with tempfile.TemporaryDirectory(prefix="spendloom-codex-") as directory_name:
         directory = Path(directory_name)

@@ -22,7 +22,8 @@ services:
   worker:
     build:
       context: .
-      target: ${WORKER_IMAGE_TARGET:-runtime}
+      # Provider-named Docker targets keep the image in sync with AI_PROVIDER.
+      target: ${AI_PROVIDER:-openai}
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
     command: ["python", "-m", "receipt_ledger.worker"]

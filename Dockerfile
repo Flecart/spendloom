@@ -19,6 +19,12 @@ USER ledger
 EXPOSE 8080
 CMD ["uvicorn", "receipt_ledger.api:app", "--host", "0.0.0.0", "--port", "8080"]
 
+# Provider-named aliases let Compose select the correct worker image directly
+# from AI_PROVIDER without a second setting that can drift out of sync.
+FROM runtime AS openai
+FROM runtime AS anthropic
+FROM runtime AS gemini
+
 FROM runtime AS codex
 USER root
 RUN apk add --no-cache nodejs npm \

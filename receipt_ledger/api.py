@@ -24,6 +24,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from .config import get_settings
 from .database import SessionLocal, get_db, init_database
+from .logging_config import configure_http_client_logging
 from .models import (
     AppSetting,
     AuditEvent,
@@ -61,6 +62,7 @@ from .services.processing import get_setting, normalize_merchant
 from .services.storage import InvalidReceiptFile
 
 settings = get_settings()
+configure_http_client_logging()
 password_hasher = PasswordHasher()
 login_attempts: dict[str, list[float]] = defaultdict(list)
 

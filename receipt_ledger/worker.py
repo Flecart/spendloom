@@ -5,15 +5,20 @@ import time
 
 from .config import get_settings
 from .database import SessionLocal, init_database
+from .logging_config import configure_logging
+from .services.codex_cli import validate_codex_runtime
 from .services.processing import process_next
 from .services.chat import process_next_chat
+
+logger = logging.getLogger(__name__)
 
 
 def main() -> None:
     settings = get_settings()
-    logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure_logging(settings.log_level)
+    validate_codex_runtime(settings)
     init_database()
-    logging.getLogger(__name__).info("Receipt worker started")
+    logger.info("Receipt worker started")
     while True:
         with SessionLocal() as db:
             processed = process_next(db, settings)
@@ -24,14 +29,14 @@ def main() -> None:
 
                 notify_completed(processed.id)
             except Exception:
-                logging.getLogger(__name__).exception("Unable to send Telegram completion notification")
+                logger.exception("Unable to send Telegram completion notification")
         if chat_job and chat_job.status in {"completed", "failed"}:
             try:
                 from .telegram_bot import notify_chat_completed
 
                 notify_chat_completed(chat_job.id)
             except Exception:
-                logging.getLogger(__name__).exception("Unable to send Telegram chat response")
+                logger.exception("Unable to send Telegram chat response")
         if not processed and not chat_job:
             time.sleep(2)
 

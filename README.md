@@ -32,7 +32,6 @@ A ChatGPT Plus subscription is not an OpenAI API key and cannot authenticate ord
 ```dotenv
 AI_PROVIDER=codex
 AI_MODEL=gpt-5.6-luna
-WORKER_IMAGE_TARGET=codex
 CODEX_AUTH_DIR=/absolute/private/path/to/spendloom-codex-auth
 ```
 
@@ -43,9 +42,11 @@ mkdir -p .codex-auth
 chmod 700 .codex-auth
 docker compose build worker
 docker compose run --rm --no-deps worker codex login --device-auth
-docker compose up -d worker
+docker compose up -d --force-recreate worker
 docker compose exec worker codex login status
 ```
+
+When changing `AI_PROVIDER` on an existing deployment, always rebuild and force-recreate the worker so the running container matches the selected provider.
 
 Keep the credential directory private: `auth.json` contains refreshable access tokens. It is excluded from Git, Docker build context, and Spendloom data backups. This mode is intended only for a trusted, private, single-user deployment. Codex runs are ephemeral, read-only, receive a minimal process environment, and are instructed not to use runtime tools; API keys remain the recommended authentication method for unattended or public automation.
 

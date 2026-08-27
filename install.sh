@@ -38,11 +38,9 @@ AI_PROVIDER=$(ask AI_PROVIDER "AI provider (openai, anthropic, gemini, codex)" "
 case $AI_PROVIDER in openai|anthropic|gemini|codex) ;; *) die "AI_PROVIDER must be openai, anthropic, gemini, or codex." ;; esac
 AI_MODEL=$(ask AI_MODEL "Receipt AI model" "gpt-5.6-luna")
 CHAT_MODEL=$(ask CHAT_MODEL "Optional chat model (blank reuses receipt model)" "")
-WORKER_IMAGE_TARGET=runtime
 CODEX_AUTH_DIR=$(env_get "$ENV_FILE" CODEX_AUTH_DIR)
 CODEX_AUTH_DIR=${CODEX_AUTH_DIR:-$ROOT_DIR/.codex-auth}
 if [[ $AI_PROVIDER == codex ]]; then
-  WORKER_IMAGE_TARGET=codex
   CODEX_AUTH_DIR=$(ask CODEX_AUTH_DIR "Private Codex credential directory" "$CODEX_AUTH_DIR")
   [[ $CODEX_AUTH_DIR == /* ]] || die "CODEX_AUTH_DIR must be an absolute path."
 else
@@ -65,7 +63,6 @@ env_set "$ENV_FILE" SESSION_SECRET "$SESSION_SECRET"
 env_set "$ENV_FILE" AI_PROVIDER "$AI_PROVIDER"
 env_set "$ENV_FILE" AI_MODEL "$AI_MODEL"
 env_set "$ENV_FILE" CHAT_MODEL "$CHAT_MODEL"
-env_set "$ENV_FILE" WORKER_IMAGE_TARGET "$WORKER_IMAGE_TARGET"
 env_set "$ENV_FILE" CODEX_AUTH_DIR "$CODEX_AUTH_DIR"
 if [[ $AI_PROVIDER != codex ]]; then
   env_set "$ENV_FILE" "$API_KEY_NAME" "$AI_KEY"

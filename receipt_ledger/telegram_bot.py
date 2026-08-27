@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from .config import get_settings
 from .database import SessionLocal, init_database
+from .logging_config import configure_logging
 from .models import AppSetting, ChatJob, Expense, Ingestion, IngestionStatus
 from .services.chat import (
     attach_processed_expense,
@@ -437,7 +438,7 @@ def time_to_datetime():
 
 def main() -> None:
     settings = get_settings()
-    logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s %(message)s")
+    configure_logging(settings.log_level)
     TelegramBot().run()
 
 

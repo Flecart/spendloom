@@ -10,6 +10,7 @@ from receipt_ledger.services.codex_cli import (
     CodexNotConfigured,
     run_codex,
     strict_output_schema,
+    validate_codex_runtime,
 )
 
 
@@ -112,6 +113,26 @@ def test_run_codex_requires_file_backed_chatgpt_login(
             prompt="test",
             output_schema={"type": "object", "properties": {}},
         )
+
+
+def test_runtime_validation_ignores_non_codex_providers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = codex_settings(tmp_path).model_copy(update={"ai_provider": "openai"})
+    monkeypatch.setattr("receipt_ledger.services.codex_cli.shutil.which", lambda command: None)
+
+    validate_codex_runtime(settings)
+
+
+def test_runtime_validation_explains_missing_worker_binary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("receipt_ledger.services.codex_cli.shutil.which", lambda command: None)
+
+    with pytest.raises(CodexNotConfigured, match="rebuild and recreate"):
+        validate_codex_runtime(codex_settings(tmp_path))
 
 
 def test_codex_receipt_provider_validates_structured_result(

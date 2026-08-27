@@ -12,9 +12,11 @@ from receipt_ledger.services.chat import (
     consume_pending_action,
     execute_tool,
     get_or_create_session,
+    process_chat_job,
     queue_chat_job,
     trim_history,
 )
+from receipt_ledger.services.codex_cli import CodexNotConfigured
 
 
 def _expense(db, when: date, amount: str) -> Expense:
@@ -66,3 +68,24 @@ def test_chat_history_is_bounded_and_delete_needs_one_use_confirmation() -> None
         token = result["confirmation_token"]
         assert consume_pending_action(db, token, "123", "456", True) == "Expense deleted."
         assert consume_pending_action(db, token, "123", "456", True) == "That confirmation has expired."
+
+
+def test_missing_codex_runtime_fails_chat_job_once(monkeypatch) -> None:
+    class MissingCodexProvider:
+        def complete(self, messages, tools):
+            raise CodexNotConfigured("Codex CLI is not installed")
+
+    monkeypatch.setattr(
+        "receipt_ledger.services.chat.chat_provider_for",
+        lambda settings: MissingCodexProvider(),
+    )
+    startup()
+    with SessionLocal() as db:
+        job = queue_chat_job(db, "missing-codex-chat", "owner", "message-1", "hello")
+
+        result = process_chat_job(db, get_settings(), job.id)
+
+        assert result is not None
+        assert result.status == "failed"
+        assert result.attempts == 1
+        assert result.response_text == "AI access is not configured on the worker. Please check the server setup."
