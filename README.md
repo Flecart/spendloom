@@ -9,7 +9,7 @@ Spendloom is a private, self-hosted receipt inbox and spending companion for one
 ## Why Spendloom
 
 - Capture JPEG, PNG, WebP, HEIC, and PDF receipts from the web or Telegram.
-- Choose OpenAI, Anthropic, or Gemini for receipt extraction and Telegram conversation; provider switches do not lose local chat context.
+- Choose OpenAI, Anthropic, Gemini, or ChatGPT subscription access through the Codex CLI for receipt extraction and Telegram conversation; provider switches do not lose local chat context.
 - Review uncertain records, remember merchant rules, normalise to EUR, and export Ramp-shaped CSV.
 - Ask Telegram to find, total, create, or correct expenses. Calculations and database writes stay on the server.
 - Keep data in your own SQLite database and receipt directory.
@@ -19,10 +19,35 @@ Spendloom is a private, self-hosted receipt inbox and spending companion for one
 | Provider | Receipt extraction | Telegram tools |
 | --- | --- | --- |
 | OpenAI | Structured Responses API | Function calling |
+| Codex CLI | Structured final output | Structured tool requests |
 | Anthropic | JSON extraction | Tool use |
 | Gemini | JSON extraction | Function declarations |
 
-Set `AI_PROVIDER`, `AI_MODEL`, and its matching API key. `CHAT_MODEL` is optional and otherwise reuses `AI_MODEL`. Without a key, receipts remain safely stored for manual review.
+Set `AI_PROVIDER`, `AI_MODEL`, and the matching credential. API providers use their corresponding API key; the `codex` provider uses the ChatGPT sign-in described below. `CHAT_MODEL` is optional and otherwise reuses `AI_MODEL`. Without a configured credential, receipts remain safely stored for manual review.
+
+### Use a ChatGPT subscription
+
+A ChatGPT Plus subscription is not an OpenAI API key and cannot authenticate ordinary calls to `api.openai.com`. Spendloom's `codex` provider instead invokes the supported Codex CLI, which can use a ChatGPT sign-in and included subscription access:
+
+```dotenv
+AI_PROVIDER=codex
+AI_MODEL=gpt-5.6-luna
+WORKER_IMAGE_TARGET=codex
+CODEX_AUTH_DIR=/absolute/private/path/to/spendloom-codex-auth
+```
+
+Run `./install.sh` and choose `codex`; the installer builds the Codex-enabled worker and starts a device-code login when the credential directory is empty. For an existing deployment, rebuild and sign in explicitly:
+
+```bash
+mkdir -p .codex-auth
+chmod 700 .codex-auth
+docker compose build worker
+docker compose run --rm --no-deps worker codex login --device-auth
+docker compose up -d worker
+docker compose exec worker codex login status
+```
+
+Keep the credential directory private: `auth.json` contains refreshable access tokens. It is excluded from Git, Docker build context, and Spendloom data backups. This mode is intended only for a trusted, private, single-user deployment. Codex runs are ephemeral, read-only, receive a minimal process environment, and are instructed not to use runtime tools; API keys remain the recommended authentication method for unattended or public automation.
 
 ## Telegram demo
 
@@ -48,7 +73,7 @@ cd spendloom
 
 The installer detects Docker Engine/Compose v2, architecture, sudo, port conflicts, daemon state, and data ownership. It can install missing native Docker packages after confirmation, preserves an existing `.env`, backs up an existing database before rebuilding, starts the Telegram profile only when a token is supplied, and waits for health.
 
-For CI or automation, use `SPENDLOOM_NONINTERACTIVE=1` plus `APP_PASSWORD`, `AI_PROVIDER`, the provider key, `AI_MODEL`, `SPENDLOOM_PORT`, `APP_ORIGIN`, `PUID`, and `PGID`. Unsupported distributions should install Docker Engine and Compose v2 manually, then run the script.
+For CI or automation, use `SPENDLOOM_NONINTERACTIVE=1` plus `APP_PASSWORD`, `AI_PROVIDER`, the provider key (or a pre-provisioned `CODEX_AUTH_DIR`), `AI_MODEL`, `SPENDLOOM_PORT`, `APP_ORIGIN`, `PUID`, and `PGID`. Unsupported distributions should install Docker Engine and Compose v2 manually, then run the script.
 
 To remove containers and networks while retaining `.env`, receipts, database, and backups:
 
@@ -62,7 +87,7 @@ Use `--remove-images` to remove local images. `--purge` creates a final archive 
 
 ```bash
 cp .env.example .env
-# Set a strong APP_PASSWORD, SESSION_SECRET, one provider key, and optionally a Telegram token.
+# Set a strong APP_PASSWORD, SESSION_SECRET, provider authentication, and optionally a Telegram token.
 docker compose up -d --build web worker
 docker compose --profile telegram up -d telegram  # optional
 ```

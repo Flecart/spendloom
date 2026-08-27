@@ -1,6 +1,8 @@
 services:
   web:
-    build: .
+    build:
+      context: .
+      target: runtime
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
     env_file: ${ENV_FILE:-.env}
@@ -18,7 +20,9 @@ services:
       retries: 5
 
   worker:
-    build: .
+    build:
+      context: .
+      target: ${WORKER_IMAGE_TARGET:-runtime}
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
     command: ["python", "-m", "receipt_ledger.worker"]
@@ -26,15 +30,19 @@ services:
     environment:
       DATA_DIR: /data
       DATABASE_URL: sqlite:////data/receipt-ledger.db
+      CODEX_HOME: /codex
     volumes:
       - ./data:/data
+      - ${CODEX_AUTH_DIR:-./.codex-auth}:/codex
     depends_on:
       web:
         condition: service_healthy
 
   telegram:
     profiles: ["telegram"]
-    build: .
+    build:
+      context: .
+      target: runtime
     restart: unless-stopped
     user: "${PUID:-1000}:${PGID:-1000}"
     command: ["python", "-m", "receipt_ledger.telegram_bot"]

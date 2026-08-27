@@ -500,11 +500,19 @@ def delete_merchant_rule(rule_id: str, _auth: Auth, db: Db) -> Response:
 
 
 def _ai_configured() -> bool:
+    if settings.ai_provider.lower() == "codex":
+        return True
     return bool({
         "openai": settings.openai_api_key,
         "anthropic": settings.anthropic_api_key,
         "gemini": settings.gemini_api_key,
     }.get(settings.ai_provider.lower()))
+
+
+def _ai_auth_label() -> str:
+    if settings.ai_provider.lower() == "codex":
+        return "ChatGPT subscription via Codex CLI"
+    return "API key"
 
 
 @app.get("/api/settings", response_model=SettingsOut)
@@ -521,6 +529,7 @@ def get_app_settings(_auth: Auth, db: Db) -> SettingsOut:
         ai_provider=settings.ai_provider,
         ai_model=settings.ai_model,
         ai_configured=_ai_configured(),
+        ai_auth_label=_ai_auth_label(),
         base_currency=settings.base_currency,
     )
 

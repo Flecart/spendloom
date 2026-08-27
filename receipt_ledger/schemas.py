@@ -209,6 +209,7 @@ class SettingsOut(BaseModel):
     ai_provider: str
     ai_model: str
     ai_configured: bool
+    ai_auth_label: str
     base_currency: str
 
 

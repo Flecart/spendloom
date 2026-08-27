@@ -5,7 +5,7 @@ RUN npm install
 COPY frontend/ ./
 RUN npm run build
 
-FROM python:3.12-alpine3.23
+FROM python:3.12-alpine3.23 AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 RUN apk add --no-cache poppler-utils curl
 WORKDIR /app
@@ -18,3 +18,10 @@ RUN adduser -D -u 10001 ledger && mkdir -p /data && chown -R ledger:ledger /data
 USER ledger
 EXPOSE 8080
 CMD ["uvicorn", "receipt_ledger.api:app", "--host", "0.0.0.0", "--port", "8080"]
+
+FROM runtime AS codex
+USER root
+RUN apk add --no-cache nodejs npm \
+    && npm install --global @openai/codex@0.150.1 \
+    && npm cache clean --force
+USER ledger

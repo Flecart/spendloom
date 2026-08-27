@@ -11,17 +11,123 @@ export default function SettingsPage() {
   const [editor,setEditor]=useState<{kind:"category"|"payment"|"rule";value:any}|null>(null);
   const load=()=>Promise.all([api<AppSettings>("/api/settings"),api<Category[]>("/api/categories?include_archived=true"),api<PaymentMethod[]>("/api/payment-methods?include_archived=true"),api<MerchantRule[]>("/api/merchant-rules")]).then(([s,c,m,r])=>{setSettings(s);setCategories(c);setMethods(m);setRules(r)}).catch(e=>setError(e.message));
   useEffect(()=>{load()},[]);
-  const saveSettings=async()=>{if(!settings)return; try{const updated=await api<AppSettings>("/api/settings",{method:"PATCH",body:JSON.stringify({owner_name:settings.owner_name,owner_email:settings.owner_email,review_mode:settings.review_mode,confidence_threshold:settings.confidence_threshold})});setSettings(updated);setNotice("Settings saved") }catch(e){setError(e instanceof Error?e.message:"Could not save")}};
   if(!settings)return error?<Alert severity="error">{error}</Alert>:<Typography>Loading settings…</Typography>;
   return <Stack spacing={3}><Box><Typography className="eyebrow">Make it yours</Typography><Typography variant="h4" className="page-title">Settings</Typography></Box>{error&&<Alert severity="error" onClose={()=>setError("")}>{error}</Alert>}{notice&&<Alert severity="success" onClose={()=>setNotice("")}>{notice}</Alert>}
     <Card><Tabs value={tab} onChange={(_,v)=>setTab(v)} variant="scrollable"><Tab label="General"/><Tab label="Telegram"/><Tab label="Categories"/><Tab label="Payments"/><Tab label="Merchant rules"/></Tabs></Card>
-    {tab===0&&<Card><CardContent><Stack spacing={2.5} sx={{maxWidth:680}}><Typography variant="h6" fontWeight={750}>Profile and automation</Typography><TextField label="Your name" value={settings.owner_name} onChange={e=>setSettings({...settings,owner_name:e.target.value})}/><TextField label="Email for exports" type="email" value={settings.owner_email} onChange={e=>setSettings({...settings,owner_email:e.target.value})}/><TextField select label="Review mode" value={settings.review_mode} onChange={e=>setSettings({...settings,review_mode:e.target.value})}><MenuItem value="uncertain">Only uncertain receipts</MenuItem><MenuItem value="always">Every receipt</MenuItem><MenuItem value="never">Never, when all required fields exist</MenuItem></TextField><TextField label="Confidence threshold" type="number" inputProps={{step:.01,min:0,max:1}} value={settings.confidence_threshold} onChange={e=>setSettings({...settings,confidence_threshold:Number(e.target.value)})} helperText="0.88 means receipts below 88% confidence enter review."/><Divider/><Box sx={{display:"flex",alignItems:"center",gap:1}}><SmartToyRounded color="primary"/><Typography fontWeight={700}>{settings.ai_provider} · {settings.ai_model}</Typography><Chip size="small" color={settings.ai_configured?"success":"warning"} label={settings.ai_configured?"Configured":"API key missing"}/></Box><Typography variant="body2" color="text.secondary">Provider and model are configured with environment variables so API keys never enter the browser. Base currency: {settings.base_currency}.</Typography><Button variant="contained" onClick={saveSettings} sx={{alignSelf:"start"}}>Save changes</Button></Stack></CardContent></Card>}
+    {tab===0&&<GeneralSettingsCard settings={settings} onChange={setSettings} onSaved={setNotice} onError={setError}/>}
     {tab===1&&<Card><CardContent><Stack spacing={2} sx={{maxWidth:720}}><Typography variant="h6" fontWeight={750}>Telegram inbox</Typography><Alert severity={settings.telegram_allowlist_configured?"success":settings.telegram_claimed?"success":"info"}>{settings.telegram_allowlist_configured?"Strict Telegram user-ID protection is active. Only the configured account can claim or use this bot.":settings.telegram_claimed?"This bot is claimed. Only the linked Telegram account may submit receipts.":"Send the command below to your bot in a private chat. The first successful claim becomes the only allowed account."}</Alert>{!settings.telegram_allowlist_configured&&<Typography variant="body2" color="text.secondary">For stronger protection, send <code>/id</code> to the bot, set the returned value as <code>TELEGRAM_ALLOWED_USER_ID</code> in your server’s .env file, then restart the Telegram service.</Typography>}<Box sx={{display:"flex",alignItems:"center",gap:1,p:2,bgcolor:"action.hover",borderRadius:3}}><Typography component="code" sx={{fontSize:"1.2rem",flex:1}}>/claim {settings.telegram_claim_code}</Typography><IconButton aria-label="Copy claim command" onClick={()=>navigator.clipboard.writeText(`/claim ${settings.telegram_claim_code}`)}><ContentCopyRounded/></IconButton></Box><Button startIcon={<RefreshRounded/>} onClick={async()=>{const r=await api<{telegram_claim_code:string}>("/api/settings/telegram-claim-code",{method:"POST"});setSettings({...settings,telegram_claim_code:r.telegram_claim_code});}}>Generate new claim code</Button><Typography variant="body2" color="text.secondary">The Telegram service talks directly to Telegram’s Bot API. OpenClaw is not used or required.</Typography></Stack></CardContent></Card>}
     {tab===2&&<Card><CardContent><Typography variant="h6" fontWeight={750} sx={{mb:2}}>Categories</Typography><CategoryForm after={load}/><Stack divider={<Divider/>}>{categories.map(c=><Box key={c.id} sx={{display:"flex",alignItems:"center",gap:2,py:1.5}}><Box sx={{width:12,height:12,borderRadius:9,bgcolor:c.color}}/><Box sx={{flex:1}}><Typography fontWeight={650}>{c.name}</Typography><Typography variant="caption" color="text.secondary">{c.code} · {c.scope}{c.quickbooks_category?` · QuickBooks: ${c.quickbooks_category}`:""}</Typography></Box>{c.archived&&<Chip size="small" label="Archived"/>}<Tooltip title="Edit category"><IconButton aria-label={`Edit ${c.name}`} onClick={()=>setEditor({kind:"category",value:{...c}})}><EditRounded/></IconButton></Tooltip></Box>)}</Stack></CardContent></Card>}
     {tab===3&&<Card><CardContent><Typography variant="h6" fontWeight={750} sx={{mb:2}}>Payment methods</Typography><PaymentForm after={load}/><Stack divider={<Divider/>}>{methods.map(m=><Box key={m.id} sx={{display:"flex",alignItems:"center",justifyContent:"space-between",py:1.5}}><Box sx={{flex:1}}><Typography fontWeight={650}>{m.name}</Typography><Typography variant="caption" color="text.secondary">{m.method_type}{m.last_four?` · •••• ${m.last_four}`:""}</Typography></Box>{m.is_default&&<Chip size="small" color="primary" label="Default"/>}{m.archived&&<Chip size="small" label="Archived"/>}<Tooltip title="Edit payment method"><IconButton aria-label={`Edit ${m.name}`} onClick={()=>setEditor({kind:"payment",value:{...m}})}><EditRounded/></IconButton></Tooltip></Box>)}</Stack></CardContent></Card>}
     {tab===4&&<Card><CardContent><Typography variant="h6" fontWeight={750}>Learned merchant rules</Typography><Typography color="text.secondary" sx={{mb:2}}>Created when you accept a receipt and choose “Remember for this merchant”. Future matching receipts inherit its category, payment method, and scope.</Typography>{rules.length?<Stack divider={<Divider/>}>{rules.map(r=><Box key={r.id} sx={{display:"flex",alignItems:"center",gap:2,py:1.5}}><Box sx={{flex:1}}><Typography fontWeight={650}>{r.merchant_display}</Typography><Typography variant="caption" color="text.secondary">{r.category_name||"No category"} · {r.payment_method_name||"Default payment"} · {r.scope||"Any scope"}</Typography></Box>{!r.enabled&&<Chip size="small" color="warning" label="Disabled"/>}<Tooltip title="Edit merchant rule"><IconButton aria-label={`Edit ${r.merchant_display}`} onClick={()=>setEditor({kind:"rule",value:{...r}})}><EditRounded/></IconButton></Tooltip><Tooltip title="Delete merchant rule"><IconButton aria-label={`Delete ${r.merchant_display}`} color="error" onClick={async()=>{if(window.confirm(`Delete rule for ${r.merchant_display}?`)){await api(`/api/merchant-rules/${r.id}`,{method:"DELETE"});load()}}}><DeleteOutlineRounded/></IconButton></Tooltip></Box>)}</Stack>:<Box className="empty-state">No merchant rules yet.</Box>}</CardContent></Card>}
     <SettingsEditor editor={editor} close={()=>setEditor(null)} categories={categories} methods={methods} after={()=>{setEditor(null);load();setNotice("Saved")}} onError={setError}/>
   </Stack>;
+}
+
+interface GeneralSettingsCardProps {
+  settings: AppSettings;
+  onChange: (settings: AppSettings) => void;
+  onSaved: (message: string) => void;
+  onError: (message: string) => void;
+}
+
+function GeneralSettingsCard({
+  settings,
+  onChange,
+  onSaved,
+  onError,
+}: GeneralSettingsCardProps) {
+  const saveSettings = async (): Promise<void> => {
+    try {
+      const updated = await api<AppSettings>("/api/settings", {
+        method: "PATCH",
+        body: JSON.stringify({
+          owner_name: settings.owner_name,
+          owner_email: settings.owner_email,
+          review_mode: settings.review_mode,
+          confidence_threshold: settings.confidence_threshold,
+        }),
+      });
+      onChange(updated);
+      onSaved("Settings saved");
+    } catch (error) {
+      onError(error instanceof Error ? error.message : "Could not save");
+    }
+  };
+
+  return (
+    <Card>
+      <CardContent>
+        <Stack spacing={2.5} sx={{ maxWidth: 680 }}>
+          <Typography variant="h6" fontWeight={750}>
+            Profile and automation
+          </Typography>
+          <TextField
+            label="Your name"
+            value={settings.owner_name}
+            onChange={(event) => onChange({
+              ...settings,
+              owner_name: event.target.value,
+            })}
+          />
+          <TextField
+            label="Email for exports"
+            type="email"
+            value={settings.owner_email}
+            onChange={(event) => onChange({
+              ...settings,
+              owner_email: event.target.value,
+            })}
+          />
+          <TextField
+            select
+            label="Review mode"
+            value={settings.review_mode}
+            onChange={(event) => onChange({
+              ...settings,
+              review_mode: event.target.value,
+            })}
+          >
+            <MenuItem value="uncertain">Only uncertain receipts</MenuItem>
+            <MenuItem value="always">Every receipt</MenuItem>
+            <MenuItem value="never">Never, when all required fields exist</MenuItem>
+          </TextField>
+          <TextField
+            label="Confidence threshold"
+            type="number"
+            inputProps={{ step: 0.01, min: 0, max: 1 }}
+            value={settings.confidence_threshold}
+            onChange={(event) => onChange({
+              ...settings,
+              confidence_threshold: Number(event.target.value),
+            })}
+            helperText="0.88 means receipts below 88% confidence enter review."
+          />
+          <Divider />
+          <Box sx={{ display: "flex", alignItems: "center", gap: 1 }}>
+            <SmartToyRounded color="primary" />
+            <Typography fontWeight={700}>
+              {settings.ai_provider} · {settings.ai_model}
+            </Typography>
+            <Chip
+              size="small"
+              color={settings.ai_configured ? "success" : "warning"}
+              label={settings.ai_configured ? settings.ai_auth_label : "API key missing"}
+            />
+          </Box>
+          <Typography variant="body2" color="text.secondary">
+            Provider and authentication are configured with server environment variables and credentials never enter the browser. Base currency: {settings.base_currency}.
+          </Typography>
+          <Button
+            variant="contained"
+            onClick={saveSettings}
+            sx={{ alignSelf: "start" }}
+          >
+            Save changes
+          </Button>
+        </Stack>
+      </CardContent>
+    </Card>
+  );
 }
 
 function SettingsEditor({editor,close,categories,methods,after,onError}:{editor:{kind:"category"|"payment"|"rule";value:any}|null;close:()=>void;categories:Category[];methods:PaymentMethod[];after:()=>void;onError:(message:string)=>void}) { const [value,setValue]=useState<any>(null); useEffect(()=>setValue(editor?{...editor.value}:null),[editor]); if(!editor||!value)return null; const set=(key:string,val:any)=>setValue({...value,[key]:val}); const save=async()=>{try{const endpoint=editor.kind==="category"?`/api/categories/${value.id}`:editor.kind==="payment"?`/api/payment-methods/${value.id}`:`/api/merchant-rules/${value.id}`;const body=editor.kind==="rule"?{merchant_display:value.merchant_display,category_id:value.category_id,payment_method_id:value.payment_method_id,scope:value.scope,enabled:value.enabled}:{...value};await api(endpoint,{method:"PATCH",body:JSON.stringify(body)});after()}catch(e){onError(e instanceof Error?e.message:"Could not save")}};return <Dialog open onClose={close} fullWidth maxWidth="sm"><DialogTitle>Edit {editor.kind==="payment"?"payment method":editor.kind==="rule"?"merchant rule":"category"}</DialogTitle><DialogContent sx={{display:"grid",gap:2,pt:"12px !important"}}>{editor.kind==="category"&&<><TextField label="Code" value={value.code} onChange={e=>set("code",e.target.value)}/><TextField label="Name" value={value.name} onChange={e=>set("name",e.target.value)}/><TextField select label="Scope" value={value.scope} onChange={e=>set("scope",e.target.value)}>{["personal","business","unknown"].map(x=><MenuItem key={x} value={x}>{x}</MenuItem>)}</TextField><TextField label="Colour" value={value.color} onChange={e=>set("color",e.target.value)}/><TextField label="Icon" value={value.icon} onChange={e=>set("icon",e.target.value)}/><TextField label="QuickBooks mapping" value={value.quickbooks_category||""} onChange={e=>set("quickbooks_category",e.target.value||null)}/><FormControlLabel control={<Checkbox checked={!!value.archived} onChange={e=>set("archived",e.target.checked)}/>} label="Archive this category"/></>}{editor.kind==="payment"&&<><TextField label="Name" value={value.name} onChange={e=>set("name",e.target.value)}/><TextField label="Type" value={value.method_type} onChange={e=>set("method_type",e.target.value)}/><TextField label="Last four" value={value.last_four||""} inputProps={{maxLength:4}} onChange={e=>set("last_four",e.target.value.replace(/\D/g,"")||null)}/><FormControlLabel control={<Checkbox checked={!!value.is_default} onChange={e=>set("is_default",e.target.checked)}/>} label="Default payment method"/><FormControlLabel control={<Checkbox checked={!!value.archived} onChange={e=>set("archived",e.target.checked)}/>} label="Archive this payment method"/></>}{editor.kind==="rule"&&<><TextField label="Merchant" value={value.merchant_display} onChange={e=>set("merchant_display",e.target.value)}/><TextField select label="Category" value={value.category_id||""} onChange={e=>set("category_id",e.target.value||null)}><MenuItem value="">No category</MenuItem>{categories.filter(c=>!c.archived).map(c=><MenuItem key={c.id} value={c.id}>{c.name}</MenuItem>)}</TextField><TextField select label="Payment method" value={value.payment_method_id||""} onChange={e=>set("payment_method_id",e.target.value||null)}><MenuItem value="">No payment method</MenuItem>{methods.filter(m=>!m.archived).map(m=><MenuItem key={m.id} value={m.id}>{m.name}</MenuItem>)}</TextField><TextField select label="Scope" value={value.scope||""} onChange={e=>set("scope",e.target.value||null)}><MenuItem value="">Any scope</MenuItem>{["personal","business","unknown"].map(x=><MenuItem key={x} value={x}>{x}</MenuItem>)}</TextField><FormControlLabel control={<Checkbox checked={!!value.enabled} onChange={e=>set("enabled",e.target.checked)}/>} label="Rule enabled"/></>}</DialogContent><DialogActions><Button onClick={close}>Cancel</Button><Button variant="contained" onClick={save}>{value.archived?"Archive":"Save changes"}</Button></DialogActions></Dialog>}

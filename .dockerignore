@@ -1,4 +1,5 @@
 .env
+.codex-auth
 .git
 .venv
 .pytest_cache

@@ -17,7 +17,7 @@ flowchart LR
 
     Worker[Background worker] -->|claim queued ingestion| DB
     Worker --> Files
-    Worker -->|receipt images + schema| AI[OpenAI / Anthropic / Gemini]
+    Worker -->|receipt images + schema| AI[OpenAI / Anthropic / Gemini / Codex CLI]
     Worker -->|historical exchange rate| ECB[ECB data API]
     Worker -->|expense + status| DB
     Bot -->|plain text chat job| DB
@@ -72,7 +72,7 @@ The original is never replaced by the normalized model input.
 
 ### 3. Structured AI extraction
 
-`services/extraction.py` defines a small provider interface with OpenAI, Anthropic, and Gemini implementations. Each provider must return the same validated `ReceiptExtraction` object:
+`services/extraction.py` defines a small provider interface with OpenAI, Anthropic, Gemini, and Codex CLI implementations. Each provider must return the same validated `ReceiptExtraction` object. The Codex CLI path is an explicit subscription-authenticated alternative to the OpenAI API; it runs only in the worker, with ephemeral read-only sessions and file-backed credentials mounted outside `/data`:
 
 - date and merchant;
 - final paid total and ISO currency;

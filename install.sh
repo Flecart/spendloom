@@ -34,12 +34,21 @@ ask() {
 APP_PASSWORD=$(ask APP_PASSWORD "Spendloom app password" "" 1)
 [[ ${#APP_PASSWORD} -ge 12 ]] || die "APP_PASSWORD must be at least 12 characters."
 SESSION_SECRET=$(env_get "$ENV_FILE" SESSION_SECRET); SESSION_SECRET=${SESSION_SECRET:-$(random_secret)}
-AI_PROVIDER=$(ask AI_PROVIDER "AI provider (openai, anthropic, gemini)" "openai")
-case $AI_PROVIDER in openai|anthropic|gemini) ;; *) die "AI_PROVIDER must be openai, anthropic, or gemini." ;; esac
+AI_PROVIDER=$(ask AI_PROVIDER "AI provider (openai, anthropic, gemini, codex)" "openai")
+case $AI_PROVIDER in openai|anthropic|gemini|codex) ;; *) die "AI_PROVIDER must be openai, anthropic, gemini, or codex." ;; esac
 AI_MODEL=$(ask AI_MODEL "Receipt AI model" "gpt-5.6-luna")
 CHAT_MODEL=$(ask CHAT_MODEL "Optional chat model (blank reuses receipt model)" "")
-API_KEY_NAME=$(tr '[:lower:]' '[:upper:]' <<<"$AI_PROVIDER")_API_KEY
-AI_KEY=$(ask "$API_KEY_NAME" "$API_KEY_NAME (blank keeps receipt processing in manual review)" "" 1)
+WORKER_IMAGE_TARGET=runtime
+CODEX_AUTH_DIR=$(env_get "$ENV_FILE" CODEX_AUTH_DIR)
+CODEX_AUTH_DIR=${CODEX_AUTH_DIR:-$ROOT_DIR/.codex-auth}
+if [[ $AI_PROVIDER == codex ]]; then
+  WORKER_IMAGE_TARGET=codex
+  CODEX_AUTH_DIR=$(ask CODEX_AUTH_DIR "Private Codex credential directory" "$CODEX_AUTH_DIR")
+  [[ $CODEX_AUTH_DIR == /* ]] || die "CODEX_AUTH_DIR must be an absolute path."
+else
+  API_KEY_NAME=$(tr '[:lower:]' '[:upper:]' <<<"$AI_PROVIDER")_API_KEY
+  AI_KEY=$(ask "$API_KEY_NAME" "$API_KEY_NAME (blank keeps receipt processing in manual review)" "" 1)
+fi
 TELEGRAM_BOT_TOKEN=$(ask TELEGRAM_BOT_TOKEN "Optional Telegram bot token" "" 1)
 TELEGRAM_ALLOWED_USER_ID=$(ask TELEGRAM_ALLOWED_USER_ID "Optional strict Telegram user ID (message /id to the bot first)" "")
 PORT=$(ask SPENDLOOM_PORT "Local web port" "8080")
@@ -56,7 +65,11 @@ env_set "$ENV_FILE" SESSION_SECRET "$SESSION_SECRET"
 env_set "$ENV_FILE" AI_PROVIDER "$AI_PROVIDER"
 env_set "$ENV_FILE" AI_MODEL "$AI_MODEL"
 env_set "$ENV_FILE" CHAT_MODEL "$CHAT_MODEL"
-env_set "$ENV_FILE" "$API_KEY_NAME" "$AI_KEY"
+env_set "$ENV_FILE" WORKER_IMAGE_TARGET "$WORKER_IMAGE_TARGET"
+env_set "$ENV_FILE" CODEX_AUTH_DIR "$CODEX_AUTH_DIR"
+if [[ $AI_PROVIDER != codex ]]; then
+  env_set "$ENV_FILE" "$API_KEY_NAME" "$AI_KEY"
+fi
 env_set "$ENV_FILE" TELEGRAM_BOT_TOKEN "$TELEGRAM_BOT_TOKEN"
 env_set "$ENV_FILE" TELEGRAM_ALLOWED_USER_ID "$TELEGRAM_ALLOWED_USER_ID"
 env_set "$ENV_FILE" APP_ORIGIN "$APP_ORIGIN"
@@ -65,6 +78,10 @@ env_set "$ENV_FILE" PGID "$PGID"
 chmod 600 "$ENV_FILE"
 
 mkdir -p "$ROOT_DIR/data/backups"
+if [[ $AI_PROVIDER == codex ]]; then
+  mkdir -p "$CODEX_AUTH_DIR"
+  chmod 700 "$CODEX_AUTH_DIR"
+fi
 if [[ -f $ROOT_DIR/data/receipt-ledger.db ]]; then
   cp -p "$ROOT_DIR/data/receipt-ledger.db" "$ROOT_DIR/data/backups/pre-install-$(date +%Y%m%dT%H%M%S)-receipt-ledger.db"
 fi
@@ -72,8 +89,19 @@ if [[ $(stat -c '%u:%g' "$ROOT_DIR/data" 2>/dev/null || true) != "$PUID:$PGID" ]
   need_sudo
   "${SUDO[@]}" chown -R "$PUID:$PGID" "$ROOT_DIR/data"
 fi
+if [[ $AI_PROVIDER == codex ]] && [[ $(stat -c '%u:%g' "$CODEX_AUTH_DIR" 2>/dev/null || true) != "$PUID:$PGID" ]]; then
+  need_sudo
+  "${SUDO[@]}" chown "$PUID:$PGID" "$CODEX_AUTH_DIR"
+fi
 
 COMPOSE=(docker compose --env-file "$ENV_FILE")
+if [[ $AI_PROVIDER == codex ]] && [[ ! -f $CODEX_AUTH_DIR/auth.json ]]; then
+  [[ ${SPENDLOOM_NONINTERACTIVE:-0} != 1 ]] || die "Codex auth is missing. Run codex login into $CODEX_AUTH_DIR before non-interactive installation."
+  say "A browser or device-code sign-in will connect the worker to your ChatGPT subscription."
+  "${COMPOSE[@]}" build worker
+  "${COMPOSE[@]}" run --rm --no-deps worker codex login --device-auth
+  [[ -f $CODEX_AUTH_DIR/auth.json ]] || die "Codex login did not create $CODEX_AUTH_DIR/auth.json."
+fi
 if [[ -n $TELEGRAM_BOT_TOKEN ]]; then
   "${COMPOSE[@]}" --profile telegram up -d --build
 else

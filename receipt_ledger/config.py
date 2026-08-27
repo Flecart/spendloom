@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
     gemini_api_key: str | None = None
+    codex_home: Path = Path("/codex")
+    codex_command: str = "codex"
+    codex_timeout_seconds: int = Field(default=180, ge=30, le=900)
 
     telegram_bot_token: str | None = None
     # Optional defence in depth: only this private Telegram account may claim
