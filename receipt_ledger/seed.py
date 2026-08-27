@@ -49,8 +49,10 @@ def seed_database(session: Session) -> None:
         for code, name, color, icon in BUSINESS_CATEGORIES:
             session.add(Category(code=code, name=name, color=color, icon=icon, scope=ExpenseScope.business))
 
-    if session.scalar(select(PaymentMethod.id).limit(1)) is None:
+    if session.scalar(select(PaymentMethod.id).where(PaymentMethod.name == "Unknown / default")) is None:
         session.add(PaymentMethod(name="Unknown / default", method_type="unknown", is_default=True))
+    if session.scalar(select(PaymentMethod.id).where(PaymentMethod.name == "Cash")) is None:
+        session.add(PaymentMethod(name="Cash", method_type="cash"))
 
     defaults = {
         "owner_name": "Owner",
