@@ -40,13 +40,13 @@ Run `./install.sh` and choose `codex`; the installer builds the Codex-enabled wo
 ```bash
 mkdir -p .codex-auth
 chmod 700 .codex-auth
-docker compose build worker
-docker compose run --rm --no-deps worker codex login --device-auth
+./scripts/codex-login.sh
 docker compose up -d --force-recreate worker
 docker compose exec worker codex login status
 ```
 
 When changing `AI_PROVIDER` on an existing deployment, always rebuild and force-recreate the worker so the running container matches the selected provider.
+The login helper also repairs credential-directory ownership, checks that `/codex` is writable from inside the worker, and then starts a fresh device-code flow. If a device page stalls, stop the command, let that one-time code expire, and rerun the helper rather than reusing the code.
 
 Keep the credential directory private: `auth.json` contains refreshable access tokens. It is excluded from Git, Docker build context, and Spendloom data backups. This mode is intended only for a trusted, private, single-user deployment. Codex runs are ephemeral, read-only, receive a minimal process environment, and are instructed not to use runtime tools; API keys remain the recommended authentication method for unattended or public automation.
 

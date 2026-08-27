@@ -106,7 +106,7 @@ def test_run_codex_requires_file_backed_chatgpt_login(
 ) -> None:
     monkeypatch.setattr("receipt_ledger.services.codex_cli.shutil.which", lambda command: "/usr/bin/codex")
 
-    with pytest.raises(CodexNotConfigured, match="codex login"):
+    with pytest.raises(CodexNotConfigured, match="login is not configured"):
         run_codex(
             codex_settings(tmp_path),
             model="gpt-test",
@@ -133,6 +133,24 @@ def test_runtime_validation_explains_missing_worker_binary(
 
     with pytest.raises(CodexNotConfigured, match="rebuild and recreate"):
         validate_codex_runtime(codex_settings(tmp_path))
+
+
+def test_runtime_validation_explains_unwritable_auth_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = codex_settings(tmp_path)
+    monkeypatch.setattr(
+        "receipt_ledger.services.codex_cli.shutil.which",
+        lambda command: "/usr/local/bin/codex",
+    )
+    monkeypatch.setattr(
+        "receipt_ledger.services.codex_cli.os.access",
+        lambda path, mode: False,
+    )
+
+    with pytest.raises(CodexNotConfigured, match="not writable"):
+        validate_codex_runtime(settings)
 
 
 def test_codex_receipt_provider_validates_structured_result(

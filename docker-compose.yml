@@ -32,6 +32,7 @@ services:
       DATA_DIR: /data
       DATABASE_URL: sqlite:////data/receipt-ledger.db
       CODEX_HOME: /codex
+      HOME: /codex
     volumes:
       - ./data:/data
       - ${CODEX_AUTH_DIR:-./.codex-auth}:/codex

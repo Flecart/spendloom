@@ -33,10 +33,18 @@ def validate_codex_runtime(settings: Settings) -> str | None:
             f"Codex CLI command {settings.codex_command!r} is not installed in the worker; "
             "rebuild and recreate the worker container"
         )
+    if not settings.codex_home.is_dir() or not os.access(
+        settings.codex_home,
+        os.W_OK | os.X_OK,
+    ):
+        raise CodexNotConfigured(
+            "Codex credential directory is not writable by the worker; run "
+            "`./scripts/codex-login.sh` to repair its ownership and sign in"
+        )
     if not codex_auth_configured(settings):
         raise CodexNotConfigured(
             "ChatGPT login is not configured; run "
-            "`docker compose run --rm --no-deps worker codex login --device-auth`"
+            "`./scripts/codex-login.sh`"
         )
     return command
 

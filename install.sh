@@ -88,7 +88,7 @@ if [[ $(stat -c '%u:%g' "$ROOT_DIR/data" 2>/dev/null || true) != "$PUID:$PGID" ]
 fi
 if [[ $AI_PROVIDER == codex ]] && [[ $(stat -c '%u:%g' "$CODEX_AUTH_DIR" 2>/dev/null || true) != "$PUID:$PGID" ]]; then
   need_sudo
-  "${SUDO[@]}" chown "$PUID:$PGID" "$CODEX_AUTH_DIR"
+  "${SUDO[@]}" chown -R "$PUID:$PGID" "$CODEX_AUTH_DIR"
 fi
 
 COMPOSE=(docker compose --env-file "$ENV_FILE")
