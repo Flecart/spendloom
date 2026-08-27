@@ -5,6 +5,7 @@ import {
 } from "@mui/material";
 import { CheckRounded, DeleteOutlineRounded, ReplayRounded } from "@mui/icons-material";
 import { api, Category, Expense, PaymentMethod, money } from "../api";
+import ReceiptDocumentsPanel from "./ReceiptDocumentsPanel";
 
 export default function ExpenseEditor({expense, open, onClose, onChanged}: {
   expense: Expense | null; open: boolean; onClose: () => void; onChanged: () => void;
@@ -40,7 +41,7 @@ export default function ExpenseEditor({expense, open, onClose, onChanged}: {
   return <Dialog open={open} onClose={busy ? undefined : onClose} fullScreen={window.innerWidth < 760} fullWidth maxWidth="lg">
     <DialogTitle sx={{display:"flex", justifyContent:"space-between", alignItems:"baseline"}}><span>{draft.merchant || "Review receipt"}</span><Typography color="text.secondary">{money(draft.amount)}</Typography></DialogTitle>
     <DialogContent dividers><Box sx={{display:"grid", gridTemplateColumns:{xs:"1fr", md:"minmax(300px, .85fr) minmax(360px, 1.15fr)"}, gap:3}}>
-      <Box>{draft.receipt_id ? <img className="receipt-preview" src={`/api/receipts/${draft.receipt_id}/preview`} alt="Receipt preview" /> : <Box className="empty-state">No receipt preview</Box>} {draft.receipt_url && <Button href={draft.receipt_url} target="_blank" sx={{mt:1}}>Open original</Button>}</Box>
+      <ReceiptDocumentsPanel documents={draft.documents || []} />
       <Stack spacing={2}>{error && <Alert severity="error">{error}</Alert>}
         <Box sx={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:2}}><TextField type="date" label="Date" InputLabelProps={{shrink:true}} value={draft.expense_date || ""} onChange={(e)=>set("expense_date",e.target.value || null)} />{field("merchant","Merchant")}{field("original_amount","Original amount")}{field("original_currency","Currency")}</Box>
         <TextField select label="Category" value={draft.category_id || ""} onChange={(e)=>set("category_id", e.target.value || null)}>{categories.map(c=><MenuItem key={c.id} value={c.id}>{c.name} · {c.scope}</MenuItem>)}</TextField>

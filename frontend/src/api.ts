@@ -1,6 +1,17 @@
 export type ExpenseStatus = "queued" | "processing" | "needs_review" | "accepted" | "duplicate" | "failed" | "cancelled";
 export type Scope = "personal" | "business" | "unknown";
 
+export interface ReceiptDocument {
+  receipt_id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  page_count: number;
+  position: number;
+  file_url: string;
+  preview_url: string | null;
+}
+
 export interface Expense {
   id: string;
   expense_date: string | null;
@@ -37,6 +48,8 @@ export interface Expense {
   receipt_url: string | null;
   source: string | null;
   ingestion_id: string | null;
+  document_count: number;
+  documents: ReceiptDocument[];
   created_at: string;
   updated_at: string;
 }
@@ -59,7 +72,7 @@ export interface AppSettings {
   ai_auth_label: string;
   base_currency: string;
 }
-export interface Ingestion { id: string; expense_id: string | null; source: string; external_id: string; status: ExpenseStatus; attempts: number; error_code: string | null; error_message: string | null; received_at: string; processed_at: string | null; }
+export interface Ingestion { id: string; expense_id: string | null; source: string; external_id: string; status: ExpenseStatus; attempts: number; error_code: string | null; error_message: string | null; received_at: string; processed_at: string | null; document_count: number; merged_into_ingestion_id: string | null; }
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);

@@ -98,7 +98,44 @@ class Ingestion(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     notification_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    reprocess_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    merged_into_ingestion_id: Mapped[str | None] = mapped_column(
+        ForeignKey("ingestions.id"),
+        nullable=True,
+        index=True,
+    )
 
+    receipt: Mapped[Receipt] = relationship()
+    documents: Mapped[list[IngestionDocument]] = relationship(
+        back_populates="ingestion",
+        cascade="all, delete-orphan",
+        order_by="IngestionDocument.position",
+    )
+
+    @property
+    def document_count(self) -> int:
+        return len(self.documents)
+
+
+class IngestionDocument(Base):
+    __tablename__ = "ingestion_documents"
+    __table_args__ = (
+        UniqueConstraint("source", "external_id", name="uq_ingestion_document_source_external"),
+        UniqueConstraint("ingestion_id", "receipt_id", name="uq_ingestion_document_receipt"),
+        Index("ix_ingestion_documents_ingestion_position", "ingestion_id", "position"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    ingestion_id: Mapped[str] = mapped_column(ForeignKey("ingestions.id"), index=True)
+    receipt_id: Mapped[str] = mapped_column(ForeignKey("receipts.id"), index=True)
+    position: Mapped[int] = mapped_column(Integer)
+    source: Mapped[str] = mapped_column(String(32), index=True)
+    external_id: Mapped[str] = mapped_column(String(180))
+    caption: Mapped[str | None] = mapped_column(Text, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    ingestion: Mapped[Ingestion] = relationship(back_populates="documents")
     receipt: Mapped[Receipt] = relationship()
 
 

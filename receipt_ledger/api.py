@@ -56,10 +56,10 @@ from .schemas import (
     SettingsUpdate,
 )
 from .services.fx import get_eur_rate
-from .services.ingestion import ingest_bytes
+from .services.ingestion import ingest_bytes, schedule_ingestion
 from .services.presentation import expense_out, merchant_rule_out
 from .services.processing import get_setting, normalize_merchant
-from .services.storage import InvalidReceiptFile
+from .services.storage import InvalidReceiptFile, sha256_bytes, sniff_mime
 
 settings = get_settings()
 configure_http_client_logging()
@@ -150,24 +150,70 @@ async def upload_receipts(
     db: Db,
     files: Annotated[list[UploadFile], File()],
     caption: Annotated[str | None, Form()] = None,
+    group_files: Annotated[bool, Form()] = False,
 ) -> list[Ingestion]:
-    output = []
+    if group_files and len(files) > settings.max_receipt_documents:
+        raise HTTPException(
+            status_code=422,
+            detail=f"A receipt can contain at most {settings.max_receipt_documents} documents",
+        )
+    uploads: list[tuple[bytes, str, str | None]] = []
     for upload in files:
         data = await upload.read(settings.max_upload_mb * 1024 * 1024 + 1)
+        if len(data) > settings.max_upload_mb * 1024 * 1024:
+            raise HTTPException(
+                status_code=422,
+                detail=f"File exceeds the {settings.max_upload_mb} MB upload limit",
+            )
+        try:
+            sniff_mime(data, upload.content_type, upload.filename or "receipt")
+        except InvalidReceiptFile as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        uploads.append((data, upload.filename or "receipt", upload.content_type))
+    if group_files:
+        total_size = sum(len(data) for data, _filename, _mime in uploads)
+        if total_size > settings.max_receipt_total_mb * 1024 * 1024:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Combined receipt documents exceed {settings.max_receipt_total_mb} MB",
+            )
+        digests = [sha256_bytes(data) for data, _filename, _mime in uploads]
+        if len(set(digests)) != len(digests):
+            raise HTTPException(status_code=422, detail="The grouped upload contains a duplicate document")
+        if db.scalar(select(Receipt).where(Receipt.sha256.in_(digests)).limit(1)):
+            raise HTTPException(status_code=422, detail="One grouped document is already saved")
+
+    output: list[Ingestion] = []
+    group_external_id = secrets.token_urlsafe(18) if group_files else None
+    grouped_ingestion = None
+    for data, filename, content_type in uploads:
+        external_id = secrets.token_urlsafe(18)
         try:
             ingestion = ingest_bytes(
                 db,
                 settings,
                 data=data,
-                filename=upload.filename or "receipt",
-                claimed_mime=upload.content_type,
+                filename=filename,
+                claimed_mime=content_type,
                 source="web",
-                external_id=secrets.token_urlsafe(18),
+                external_id=external_id,
                 caption=caption,
+                group_external_id=group_external_id,
+                ready_at=(
+                    datetime.now(timezone.utc) + timedelta(seconds=3)
+                    if group_files
+                    else None
+                ),
             )
         except InvalidReceiptFile as exc:
             raise HTTPException(status_code=422, detail=str(exc))
-        output.append(ingestion)
+        if group_files:
+            grouped_ingestion = ingestion
+        else:
+            output.append(ingestion)
+    if grouped_ingestion:
+        schedule_ingestion(db, grouped_ingestion, ready_at=datetime.now(timezone.utc))
+        output.append(grouped_ingestion)
     return output
 
 
@@ -706,25 +752,32 @@ def export_reimbursement_zip(payload: ReimbursementExportRequest, _auth: Auth, d
     if missing_ids:
         raise HTTPException(status_code=422, detail="One or more selected expenses do not exist or have been deleted")
 
-    ingestions = db.scalars(
-        select(Ingestion)
-        .options(joinedload(Ingestion.receipt))
-        .where(Ingestion.expense_id.in_(expense_ids))
-        .order_by(Ingestion.received_at.desc())
-    ).unique().all()
-    ingestions_by_expense: dict[str, Ingestion] = {}
-    for ingestion in ingestions:
-        if ingestion.expense_id and ingestion.expense_id not in ingestions_by_expense:
-            ingestions_by_expense[ingestion.expense_id] = ingestion
+    selected: list[tuple[Expense, list[Receipt]]] = []
+    for expense_id in expense_ids:
+        expense = expenses_by_id[expense_id]
+        document_ids = [
+            document.receipt_id
+            for document in expense_out(db, settings, expense).documents
+        ]
+        receipts_by_id = {
+            receipt.id: receipt
+            for receipt in db.scalars(select(Receipt).where(Receipt.id.in_(document_ids))).all()
+        }
+        receipts = [
+            receipts_by_id[receipt_id]
+            for receipt_id in document_ids
+            if receipt_id in receipts_by_id
+        ]
+        selected.append((expense, receipts))
 
-    selected = [(expenses_by_id[expense_id], ingestions_by_expense.get(expense_id)) for expense_id in expense_ids]
-    for expense, ingestion in selected:
-        if not ingestion or not ingestion.receipt:
+    for expense, receipts in selected:
+        if not receipts:
             raise HTTPException(status_code=422, detail=f"Selected expense {expense.id} does not have a receipt")
         if expense.amount is None or expense.currency.upper() != "EUR":
             raise HTTPException(status_code=422, detail=f"Selected expense {expense.id} does not have a normalized EUR amount")
-        if not Path(ingestion.receipt.storage_path).is_file():
-            raise HTTPException(status_code=422, detail=f"Receipt file for selected expense {expense.id} is missing")
+        for receipt in receipts:
+            if not Path(receipt.storage_path).is_file():
+                raise HTTPException(status_code=422, detail=f"Receipt file for selected expense {expense.id} is missing")
 
     csv_stream = io.StringIO()
     writer = csv.DictWriter(csv_stream, fieldnames=REIMBURSEMENT_HEADERS)
@@ -734,15 +787,26 @@ def export_reimbursement_zip(payload: ReimbursementExportRequest, _auth: Auth, d
 
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
-        for sequence, (expense, ingestion) in enumerate(selected, start=1):
-            receipt = ingestion.receipt
-            archive_filename = (
-                f"receipts/{sequence:03d}_{expense.expense_date.isoformat() if expense.expense_date else 'undated'}_"
-                f"{_safe_receipt_component(expense.merchant, 'unknown-merchant')}{_safe_receipt_extension(receipt)}"
-            )
-            bundle.write(receipt.storage_path, archive_filename)
+        document_total = 0
+        for sequence, (expense, receipts) in enumerate(selected, start=1):
+            archive_filenames: list[str] = []
+            for document_sequence, receipt in enumerate(receipts, start=1):
+                document_marker = (
+                    f"_{document_sequence:02d}"
+                    if len(receipts) > 1
+                    else ""
+                )
+                archive_filename = (
+                    f"receipts/{sequence:03d}{document_marker}_"
+                    f"{expense.expense_date.isoformat() if expense.expense_date else 'undated'}_"
+                    f"{_safe_receipt_component(expense.merchant, 'unknown-merchant')}"
+                    f"{_safe_receipt_extension(receipt)}"
+                )
+                bundle.write(receipt.storage_path, archive_filename)
+                archive_filenames.append(archive_filename)
+                document_total += 1
             writer.writerow({
-                "Archive Filename": archive_filename,
+                "Archive Filename": "; ".join(archive_filenames),
                 "Date": expense.expense_date.isoformat() if expense.expense_date else "",
                 "Merchant": expense.merchant or "",
                 "Original Amount": str(expense.original_amount) if expense.original_amount is not None else "",
@@ -764,6 +828,7 @@ def export_reimbursement_zip(payload: ReimbursementExportRequest, _auth: Auth, d
             "Spendloom reimbursement export",
             f"Created: {date.today().isoformat()}",
             f"Selected receipt count: {len(selected)}",
+            f"Included document count: {document_total}",
             f"Total EUR reimbursement amount: {eur_total:.2f} EUR",
             "",
             "Original-currency subtotals:",
@@ -797,7 +862,17 @@ def export_csv(
     expenses = db.scalars(query.order_by(Expense.expense_date)).unique().all()
     owner_name = get_setting(db, "owner_name", "Owner")
     owner_email = get_setting(db, "owner_email", "")
-    headers = RAMP_HEADERS + (["Expense Scope", "Review Status", "FX Estimated"] if extended else [])
+    headers = RAMP_HEADERS + (
+        [
+            "Expense Scope",
+            "Review Status",
+            "FX Estimated",
+            "Receipt Count",
+            "Receipt URLs",
+        ]
+        if extended
+        else []
+    )
     stream = io.StringIO()
     writer = csv.DictWriter(stream, fieldnames=headers)
     writer.writeheader()
@@ -831,7 +906,16 @@ def export_csv(
             "QuickBooks Vendor": expense.quickbooks_vendor or "",
         }
         if extended:
-            row.update({"Expense Scope": expense.scope.value, "Review Status": expense.status.value, "FX Estimated": "Yes" if expense.fx_estimated else "No"})
+            row.update({
+                "Expense Scope": expense.scope.value,
+                "Review Status": expense.status.value,
+                "FX Estimated": "Yes" if expense.fx_estimated else "No",
+                "Receipt Count": str(item.document_count),
+                "Receipt URLs": "; ".join(
+                    f"{base_url}{document.file_url}"
+                    for document in item.documents
+                ),
+            })
         writer.writerow(row)
     filename = f"spendloom-expenses-{date.today().isoformat()}.csv"
     return Response(stream.getvalue(), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{filename}"'})

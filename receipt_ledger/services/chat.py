@@ -37,6 +37,7 @@ from ..models import (
 )
 from .codex_cli import CodexNotConfigured, run_codex
 from .fx import get_eur_rate
+from .ingestion import ingestion_documents
 from .processing import normalize_merchant, parse_date, parse_decimal
 
 logger = logging.getLogger(__name__)
@@ -329,8 +330,18 @@ def queue_chat_job(db: Session, chat_id: str | int, user_id: str | int, message_
 def context_status(db: Session, chat_id: str | int, user_id: str | int) -> dict[str, Any]:
     session = get_or_create_session(db, chat_id, user_id)
     retained = trim_history(db, session.id)
+    document_count = (
+        len(ingestion_documents(db, session.active_ingestion_id))
+        if session.active_ingestion_id
+        else 0
+    )
     db.commit()
-    return {"ingestion_id": session.active_ingestion_id, "expense_id": session.active_expense_id, "retained_messages": retained}
+    return {
+        "ingestion_id": session.active_ingestion_id,
+        "expense_id": session.active_expense_id,
+        "document_count": document_count,
+        "retained_messages": retained,
+    }
 
 
 def _expense_dict(expense: Expense) -> dict[str, Any]:

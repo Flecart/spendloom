@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..config import Settings
@@ -23,6 +23,7 @@ from ..models import (
 from ..schemas import ReceiptExtraction
 from .extraction import ProviderNotConfigured, build_prompt, provider_for
 from .fx import get_eur_rate
+from .ingestion import ingestion_documents
 from .storage import InvalidReceiptFile, prepare_visuals
 
 logger = logging.getLogger(__name__)
@@ -106,18 +107,44 @@ def process_ingestion(db: Session, settings: Settings, ingestion_id: str) -> Ing
     ingestion.model = settings.ai_model
     ingestion.error_code = None
     ingestion.error_message = None
+    ingestion.ready_at = None
+    ingestion.reprocess_requested = False
     db.commit()
 
     try:
-        receipt = ingestion.receipt
-        images, preview_path, page_count, embedded_text = prepare_visuals(
-            settings, receipt.id, receipt.storage_path, receipt.mime_type
-        )
-        receipt.preview_path = preview_path
-        receipt.page_count = page_count
+        documents = ingestion_documents(db, ingestion.id)
+        if not documents:
+            raise InvalidReceiptFile("Receipt has no stored documents")
+        images: list[tuple[bytes, str]] = []
+        captions: list[str] = []
+        embedded_sections: list[str] = []
+        total_pages = 0
+        for index, document in enumerate(documents, start=1):
+            receipt = document.receipt
+            document_images, preview_path, page_count, embedded_text = prepare_visuals(
+                settings,
+                receipt.id,
+                receipt.storage_path,
+                receipt.mime_type,
+            )
+            total_pages += page_count
+            if total_pages > settings.max_receipt_total_pages:
+                raise InvalidReceiptFile(
+                    "Combined receipt documents exceed "
+                    f"{settings.max_receipt_total_pages} rendered pages"
+                )
+            receipt.preview_path = preview_path
+            receipt.page_count = page_count
+            images.extend(document_images)
+            if document.caption:
+                captions.append(f"Document {index}: {document.caption.strip()}")
+            if embedded_text:
+                embedded_sections.append(f"Document {index}:\n{embedded_text.strip()}")
         categories = db.scalars(select(Category).where(Category.archived.is_(False))).all()
         prompt_categories = [(item.code, item.name, item.scope.value) for item in categories]
-        prompt = build_prompt(prompt_categories, ingestion.caption, embedded_text)
+        combined_caption = "\n".join(captions) or ingestion.caption
+        combined_text = "\n\n".join(embedded_sections)
+        prompt = build_prompt(prompt_categories, combined_caption, combined_text)
         extracted = provider_for(settings).extract(prompt, images)
         ingestion.raw_extraction = extracted.model_dump(mode="json")
         _create_expense(db, settings, ingestion, extracted, categories)
@@ -151,6 +178,14 @@ def process_ingestion(db: Session, settings: Settings, ingestion_id: str) -> Ing
         else:
             ingestion.status = IngestionStatus.queued
         db.commit()
+    db.refresh(ingestion)
+    if ingestion.reprocess_requested and ingestion.status != IngestionStatus.failed:
+        ingestion.reprocess_requested = False
+        ingestion.status = IngestionStatus.queued
+        ingestion.ready_at = datetime.now(timezone.utc) + timedelta(seconds=3)
+        ingestion.processed_at = None
+        db.commit()
+        db.refresh(ingestion)
     return ingestion
 
 
@@ -210,8 +245,15 @@ def _create_expense(
     else:
         status = IngestionStatus.accepted if required_complete and extracted.confidence >= threshold else IngestionStatus.needs_review
 
+    existing_expense = db.get(Expense, ingestion.expense_id) if ingestion.expense_id else None
     duplicate_match = None
-    if expense_date and merchant_normalized and amount_original is not None and currency:
+    if (
+        not existing_expense
+        and expense_date
+        and merchant_normalized
+        and amount_original is not None
+        and currency
+    ):
         duplicate_match = db.scalar(
             select(Expense).where(
                 Expense.deleted_at.is_(None),
@@ -223,6 +265,41 @@ def _create_expense(
         )
     if duplicate_match:
         status = IngestionStatus.duplicate
+
+    if existing_expense:
+        _fill_expense_gaps(
+            settings,
+            existing_expense,
+            expense_date=expense_date,
+            merchant=merchant,
+            merchant_normalized=merchant_normalized,
+            amount_original=amount_original,
+            currency=currency,
+            normalized_amount=normalized_amount,
+            conversion_rate=conversion_rate,
+            fx_date=fx_date,
+            category=category,
+            payment=payment,
+            scope=scope,
+            location=extracted.location,
+            memo=extracted.memo or ingestion.caption,
+            confidence=extracted.confidence,
+            categorization_source=categorization_source,
+            category_reason=category_reason,
+        )
+        existing_expense.status = IngestionStatus.needs_review
+        ingestion.status = IngestionStatus.needs_review
+        ingestion.processed_at = datetime.now(timezone.utc)
+        db.add(
+            AuditEvent(
+                entity_type="expense",
+                entity_id=existing_expense.id,
+                action="documents_reprocessed",
+                details={"ingestion_id": ingestion.id},
+            )
+        )
+        db.commit()
+        return
 
     expense = Expense(
         expense_date=expense_date,
@@ -256,9 +333,74 @@ def _create_expense(
     db.commit()
 
 
+def _fill_expense_gaps(
+    settings: Settings,
+    expense: Expense,
+    *,
+    expense_date: date | None,
+    merchant: str | None,
+    merchant_normalized: str | None,
+    amount_original: Decimal | None,
+    currency: str | None,
+    normalized_amount: Decimal | None,
+    conversion_rate: Decimal | None,
+    fx_date: date | None,
+    category: Category | None,
+    payment: PaymentMethod | None,
+    scope: ExpenseScope,
+    location: str | None,
+    memo: str | None,
+    confidence: float,
+    categorization_source: str,
+    category_reason: str | None,
+) -> None:
+    if expense.expense_date is None:
+        expense.expense_date = expense_date
+    if expense.merchant is None:
+        expense.merchant = merchant
+        expense.merchant_normalized = merchant_normalized
+    if expense.original_amount is None:
+        expense.original_amount = amount_original
+    if expense.original_currency is None:
+        expense.original_currency = currency
+    if expense.amount is None:
+        expense.amount = normalized_amount
+        expense.conversion_rate = conversion_rate
+        expense.fx_rate_date = fx_date
+        expense.fx_estimated = bool(
+            fx_date and expense.expense_date and fx_date != expense.expense_date
+        )
+    if expense.category_id is None and category:
+        expense.category_id = category.id
+        expense.quickbooks_category = expense.quickbooks_category or category.quickbooks_category
+        expense.categorization_source = categorization_source
+    if expense.payment_method_id is None and payment:
+        expense.payment_method_id = payment.id
+    if expense.scope == ExpenseScope.unknown and scope != ExpenseScope.unknown:
+        expense.scope = scope
+    if expense.location is None:
+        expense.location = location
+    if expense.memo is None:
+        expense.memo = memo
+    if not expense.category_reason:
+        expense.category_reason = category_reason
+    if not expense.quickbooks_vendor:
+        expense.quickbooks_vendor = expense.merchant
+    if not expense.confidence:
+        expense.confidence = confidence
+    expense.currency = expense.currency or settings.base_currency
+
+
 def process_next(db: Session, settings: Settings) -> Ingestion | None:
+    now = datetime.now(timezone.utc)
     ingestion = db.scalar(
-        select(Ingestion).where(Ingestion.status == IngestionStatus.queued).order_by(Ingestion.received_at).limit(1)
+        select(Ingestion)
+        .where(
+            Ingestion.status == IngestionStatus.queued,
+            or_(Ingestion.ready_at.is_(None), Ingestion.ready_at <= now),
+        )
+        .order_by(Ingestion.ready_at, Ingestion.received_at)
+        .limit(1)
     )
     if not ingestion:
         return None

@@ -4,18 +4,45 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
 from ..config import Settings
-from ..models import Expense, Ingestion
-from ..schemas import ExpenseOut, MerchantRuleOut
+from ..models import Expense, Ingestion, IngestionDocument
+from ..schemas import ExpenseOut, MerchantRuleOut, ReceiptDocumentOut
 
 
 def expense_out(db: Session, settings: Settings, expense: Expense) -> ExpenseOut:
-    ingestion = db.scalar(
-        select(Ingestion)
-        .options(joinedload(Ingestion.receipt))
-        .where(Ingestion.expense_id == expense.id)
-        .order_by(Ingestion.received_at.desc())
-        .limit(1)
+    rows = list(
+        db.execute(
+            select(IngestionDocument, Ingestion)
+            .join(Ingestion, Ingestion.id == IngestionDocument.ingestion_id)
+            .options(joinedload(IngestionDocument.receipt))
+            .where(Ingestion.expense_id == expense.id)
+            .order_by(Ingestion.received_at, IngestionDocument.position)
+        ).all()
     )
+    seen_receipts: set[str] = set()
+    document_rows: list[tuple[IngestionDocument, Ingestion]] = []
+    for document, ingestion in rows:
+        if document.receipt_id in seen_receipts:
+            continue
+        seen_receipts.add(document.receipt_id)
+        document_rows.append((document, ingestion))
+    primary_document, primary_ingestion = document_rows[0] if document_rows else (None, None)
+    documents = [
+        ReceiptDocumentOut(
+            receipt_id=document.receipt_id,
+            filename=document.receipt.original_filename,
+            mime_type=document.receipt.mime_type,
+            size_bytes=document.receipt.size_bytes,
+            page_count=document.receipt.page_count,
+            position=index,
+            file_url=f"/api/receipts/{document.receipt_id}/file",
+            preview_url=(
+                f"/api/receipts/{document.receipt_id}/preview"
+                if document.receipt.preview_path
+                else None
+            ),
+        )
+        for index, (document, _ingestion) in enumerate(document_rows)
+    ]
     return ExpenseOut(
         id=expense.id,
         expense_date=expense.expense_date,
@@ -47,11 +74,17 @@ def expense_out(db: Session, settings: Settings, expense: Expense) -> ExpenseOut
         quickbooks_location=expense.quickbooks_location,
         quickbooks_subprogram=expense.quickbooks_subprogram,
         quickbooks_vendor=expense.quickbooks_vendor,
-        receipt_id=ingestion.receipt_id if ingestion else None,
-        receipt_filename=ingestion.receipt.original_filename if ingestion else None,
-        receipt_url=f"/api/receipts/{ingestion.receipt_id}/file" if ingestion else None,
-        source=ingestion.source if ingestion else None,
-        ingestion_id=ingestion.id if ingestion else None,
+        receipt_id=primary_document.receipt_id if primary_document else None,
+        receipt_filename=primary_document.receipt.original_filename if primary_document else None,
+        receipt_url=(
+            f"/api/receipts/{primary_document.receipt_id}/file"
+            if primary_document
+            else None
+        ),
+        source=primary_ingestion.source if primary_ingestion else None,
+        ingestion_id=primary_ingestion.id if primary_ingestion else None,
+        document_count=len(documents),
+        documents=documents,
         created_at=expense.created_at,
         updated_at=expense.updated_at,
     )

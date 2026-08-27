@@ -9,6 +9,7 @@ Spendloom is a private, self-hosted receipt inbox and spending companion for one
 ## Why Spendloom
 
 - Capture JPEG, PNG, WebP, HEIC, and PDF receipts from the web or Telegram.
+- Keep front/back images, supporting slips, or separate pages together as one receipt and one expense.
 - Choose OpenAI, Anthropic, Gemini, or ChatGPT subscription access through the Codex CLI for receipt extraction and Telegram conversation; provider switches do not lose local chat context.
 - Review uncertain records, remember merchant rules, normalise to EUR, and export Ramp-shaped CSV.
 - Ask Telegram to find, total, create, or correct expenses. Calculations and database writes stay on the server.
@@ -52,7 +53,9 @@ Keep the credential directory private: `auth.json` contains refreshable access t
 
 ## Telegram demo
 
-After claiming the private bot, send a receipt and then write: “make that business”, “what did I spend on travel in July?”, or “export this year”. Spendloom retains at most eight user/assistant exchanges for 24 hours. `/new` clears that context and `/context` shows the active receipt and retained count. Deleting, archiving, replacing, and bulk changes always require a one-use Confirm/Cancel button that expires after ten minutes.
+After claiming the private bot, send a receipt and then write: “make that business”, “what did I spend on travel in July?”, or “export this year”. Telegram albums are processed as one receipt. When another standalone document or album arrives while a receipt is active, choose **Add to current receipt** or **Start new receipt**; adding preserves the current conversation. An unanswered choice is processed separately after ten minutes without replacing the active context. Spendloom retains at most eight user/assistant exchanges for 24 hours. `/new` clears that context and `/context` shows the active receipt, document count, and retained message count. Deleting, archiving, replacing, and bulk changes always require a one-use Confirm/Cancel button that expires after ten minutes.
+
+In the web uploader, select multiple files and enable **These files belong to one receipt** to extract them together. Separate receipts remain the default. Group limits can be adjusted with `MAX_RECEIPT_DOCUMENTS`, `MAX_RECEIPT_TOTAL_MB`, and `MAX_RECEIPT_TOTAL_PAGES`.
 
 For the strongest single-user setup, send `/id` to the bot, put the returned numeric value in `TELEGRAM_ALLOWED_USER_ID` in `.env`, then restart the Telegram service with `docker compose --profile telegram up -d --force-recreate telegram`. That allowlist is checked on every message and button callback, so no other Telegram account can claim or use the bot, even if it knows a claim code. It also lets the configured account reclaim a copied database with a stale bot owner.
 

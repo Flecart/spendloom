@@ -4,7 +4,7 @@ import html
 import logging
 import secrets
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -20,10 +20,20 @@ from .services.chat import (
     consume_pending_action,
     context_status,
     export_csv_bytes,
+    get_or_create_session,
     queue_chat_job,
     reset_context,
 )
-from .services.ingestion import ingest_bytes
+from .services.ingestion import (
+    RECEIPT_GROUPING_AGE,
+    RECEIPT_SETTLE_AGE,
+    DuplicateReceiptDocument,
+    canonical_ingestion,
+    create_receipt_grouping_choice,
+    ingest_bytes,
+    ingestion_documents,
+    resolve_receipt_grouping_choice,
+)
 from .services.storage import ALLOWED_MIMES, InvalidReceiptFile
 
 logger = logging.getLogger(__name__)
@@ -194,7 +204,30 @@ class TelegramBot:
             return
         data = str(callback.get("data") or "")
         parts = data.split(":", 2)
-        if len(parts) != 3 or parts[0] != "spendloom" or parts[1] not in {"confirm", "cancel"}:
+        if len(parts) != 3 or parts[0] != "spendloom":
+            self.send(chat_id, "That action is no longer available.")
+            return
+        if parts[1] in {"receipt-add", "receipt-new"}:
+            with SessionLocal() as db:
+                ingestion, start_new, result = resolve_receipt_grouping_choice(
+                    db,
+                    self.settings,
+                    token=parts[2],
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    add_to_current=parts[1] == "receipt-add",
+                )
+                if start_new and ingestion:
+                    anchor_receipt(
+                        db,
+                        chat_id,
+                        user_id,
+                        ingestion.id,
+                        ingestion.expense_id,
+                    )
+            self.send(chat_id, result)
+            return
+        if parts[1] not in {"confirm", "cancel"}:
             self.send(chat_id, "That action is no longer available.")
             return
         with SessionLocal() as db:
@@ -266,7 +299,12 @@ class TelegramBot:
         with SessionLocal() as db:
             state = context_status(db, chat_id, user_id)
         active = state["expense_id"] or state["ingestion_id"] or "none"
-        self.send(chat_id, f"Active receipt/expense: {active}\nRetained messages: {state['retained_messages']} of {16} maximum.")
+        self.send(
+            chat_id,
+            f"Active receipt/expense: {active}\n"
+            f"Documents: {state['document_count']}\n"
+            f"Retained messages: {state['retained_messages']} of {16} maximum.",
+        )
 
     def handle_attachment(self, chat_id: int, user_id: int, message: dict) -> None:
         document = message.get("document")
@@ -301,7 +339,50 @@ class TelegramBot:
             response = self.client.get(f"{self.file_url}/{file_info['file_path']}", timeout=45)
             response.raise_for_status()
             external_id = f"{chat_id}:{message.get('message_id')}:{unique_id}"
+            media_group_id = str(message.get("media_group_id") or "").strip()
+            group_external_id = (
+                f"{chat_id}:album:{media_group_id}"
+                if media_group_id
+                else external_id
+            )
+            now = datetime.now(timezone.utc)
             with SessionLocal() as db:
+                existing_group = db.scalar(
+                    select(Ingestion).where(
+                        Ingestion.source == "telegram",
+                        Ingestion.external_id == group_external_id,
+                    )
+                )
+                session = get_or_create_session(db, chat_id, user_id)
+                active_ingestion = (
+                    db.get(Ingestion, session.active_ingestion_id)
+                    if session.active_ingestion_id
+                    else None
+                )
+                if active_ingestion:
+                    active_ingestion = canonical_ingestion(db, active_ingestion)
+                existing_ready_at = existing_group.ready_at if existing_group else None
+                if existing_ready_at and not existing_ready_at.tzinfo:
+                    existing_ready_at = existing_ready_at.replace(tzinfo=timezone.utc)
+                is_first_document = existing_group is None
+                has_active_target = bool(
+                    is_first_document
+                    and active_ingestion
+                    and active_ingestion.status != IngestionStatus.cancelled
+                )
+                if has_active_target:
+                    ready_at = now + RECEIPT_GROUPING_AGE
+                elif existing_group and existing_group.merged_into_ingestion_id:
+                    ready_at = now + RECEIPT_SETTLE_AGE
+                elif (
+                    existing_ready_at
+                    and existing_ready_at > now + timedelta(minutes=1)
+                ):
+                    ready_at = existing_ready_at
+                elif media_group_id:
+                    ready_at = now + RECEIPT_SETTLE_AGE
+                else:
+                    ready_at = now
                 ingestion = ingest_bytes(
                     db,
                     self.settings,
@@ -313,12 +394,62 @@ class TelegramBot:
                     caption=message.get("caption"),
                     source_user_id=str(user_id),
                     source_chat_id=str(chat_id),
+                    group_external_id=group_external_id,
+                    ready_at=ready_at,
                 )
-                anchor_receipt(db, chat_id, user_id, ingestion.id, ingestion.expense_id)
+                document_count = len(ingestion_documents(db, ingestion.id))
+                grouping_action = None
+                if (
+                    ingestion.status != IngestionStatus.duplicate
+                    and has_active_target
+                    and active_ingestion
+                ):
+                    grouping_action = create_receipt_grouping_choice(
+                        db,
+                        source_ingestion=ingestion,
+                        target_ingestion=active_ingestion,
+                        chat_id=chat_id,
+                        user_id=user_id,
+                    )
+                elif ingestion.status != IngestionStatus.duplicate and is_first_document:
+                    anchor_receipt(
+                        db,
+                        chat_id,
+                        user_id,
+                        ingestion.id,
+                        ingestion.expense_id,
+                    )
             if ingestion.status == IngestionStatus.duplicate:
                 self.send(chat_id, f"Already saved — duplicate receipt ({ingestion.id}).")
+            elif grouping_action:
+                self.send(
+                    chat_id,
+                    "Document saved. Does this belong to the current receipt or start a new one? "
+                    "If you do not choose within 10 minutes, it will be processed separately without changing the current context.",
+                    [[
+                        {
+                            "text": "Add to current receipt",
+                            "callback_data": f"spendloom:receipt-add:{grouping_action.token}",
+                        },
+                        {
+                            "text": "Start new receipt",
+                            "callback_data": f"spendloom:receipt-new:{grouping_action.token}",
+                        },
+                    ]],
+                )
+            elif not is_first_document:
+                self.send(
+                    chat_id,
+                    f"Added document {document_count} to receipt {ingestion.id[:8]}.",
+                )
             else:
-                self.send(chat_id, f"Receipt saved and queued. ID: {ingestion.id}\nI’ve started a fresh receipt context, so follow-ups like “make that business” will apply to this receipt once it finishes.")
+                self.send(
+                    chat_id,
+                    f"Receipt saved with {document_count} document(s) and queued. ID: {ingestion.id}\n"
+                    "Follow-ups like “make that business” will apply to this receipt once it finishes.",
+                )
+        except DuplicateReceiptDocument as exc:
+            self.send(chat_id, str(exc))
         except InvalidReceiptFile as exc:
             self.send(chat_id, f"I couldn’t save that receipt: {exc}")
         except Exception:
@@ -373,10 +504,11 @@ def notify_completed(ingestion_id: str) -> None:
             return
         expense = db.get(Expense, item.expense_id) if item.expense_id else None
         attach_processed_expense(db, item)
+        document_count = len(ingestion_documents(db, item.id))
         if item.status == IngestionStatus.accepted and expense:
-            text = receipt_summary(item, expense)
+            text = receipt_summary(item, expense, document_count)
         elif item.status in {IngestionStatus.needs_review, IngestionStatus.duplicate}:
-            text = receipt_summary(item, expense) if expense else f"Receipt {item.id[:8]} needs review in Spendloom ({item.status.value.replace('_', ' ')})."
+            text = receipt_summary(item, expense, document_count) if expense else f"Receipt {item.id[:8]} needs review in Spendloom ({item.status.value.replace('_', ' ')})."
         elif item.status == IngestionStatus.failed:
             text = f"Receipt {item.id[:8]} failed to process. The original is stored; review it in Spendloom."
         else:
@@ -392,7 +524,7 @@ def reset_context_for_chat(chat_id: int, user_id: int) -> None:
         reset_context(db, chat_id, user_id)
 
 
-def receipt_summary(item: Ingestion, expense: Expense) -> str:
+def receipt_summary(item: Ingestion, expense: Expense, document_count: int = 1) -> str:
     category = expense.category.name if expense.category else "Uncategorized"
     payment = expense.payment_method.name if expense.payment_method else "Not set"
     original = f"{expense.original_amount} {expense.original_currency}" if expense.original_amount is not None else "unknown"
@@ -404,7 +536,7 @@ def receipt_summary(item: Ingestion, expense: Expense) -> str:
         f"Receipt {item.status.value.replace('_', ' ')}\n"
         f"Merchant: {expense.merchant or 'Unknown'}\nDate: {expense.expense_date.isoformat() if expense.expense_date else 'Unknown'}\n"
         f"Original: {original}\nEUR: {eur}\nCategory: {category}\nScope: {expense.scope.value}\n"
-        f"Payment: {payment}\nConfidence: {confidence}\nCategorized by: {source}\nReason: {reason}\nReceipt ID: {item.id}"
+        f"Payment: {payment}\nDocuments: {document_count}\nConfidence: {confidence}\nCategorized by: {source}\nReason: {reason}\nReceipt ID: {item.id}"
     )
 
 

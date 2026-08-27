@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     base_currency: str = "EUR"
     max_upload_mb: int = 50
     max_pdf_pages: int = 20
+    max_receipt_documents: int = Field(default=10, ge=1, le=50)
+    max_receipt_total_mb: int = Field(default=100, ge=1, le=1000)
+    max_receipt_total_pages: int = Field(default=20, ge=1, le=200)
     confidence_threshold: float = 0.88
 
     ai_provider: str = "openai"

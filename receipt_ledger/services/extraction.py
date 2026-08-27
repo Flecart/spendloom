@@ -129,7 +129,7 @@ def build_prompt(categories: list[tuple[str, str, str]], caption: str | None, em
     schema = json.dumps(ReceiptExtraction.model_json_schema(), separators=(",", ":"))
     context = caption.strip() if caption else "No user caption."
     pdf_text = embedded_text.strip()[:12_000] if embedded_text else "No embedded text."
-    return f"""You extract a single expense from one receipt. Never invent values. The final paid total is original_amount.
+    return f"""You extract a single expense from one logical receipt. It may contain multiple ordered documents or pages from the same purchase. Never invent values. The final paid total is original_amount.
 Choose category_code only from the supplied categories. Use ISO date YYYY-MM-DD and ISO 4217 currency.
 Classify scope as personal, business, or unknown. Confidence represents confidence in the complete extraction.
 

@@ -85,6 +85,17 @@ class PaymentMethodUpdate(BaseModel):
     archived: bool | None = None
 
 
+class ReceiptDocumentOut(BaseModel):
+    receipt_id: str
+    filename: str
+    mime_type: str
+    size_bytes: int
+    page_count: int
+    position: int
+    file_url: str
+    preview_url: str | None
+
+
 class ExpenseOut(BaseModel):
     id: str
     expense_date: date | None
@@ -121,6 +132,8 @@ class ExpenseOut(BaseModel):
     receipt_url: str | None
     source: str | None
     ingestion_id: str | None
+    document_count: int
+    documents: list[ReceiptDocumentOut]
     created_at: datetime
     updated_at: datetime
 
@@ -165,6 +178,8 @@ class IngestionOut(BaseModel):
     error_message: str | None
     received_at: datetime
     processed_at: datetime | None
+    document_count: int
+    merged_into_ingestion_id: str | None
 
 
 class MerchantRuleOut(BaseModel):
