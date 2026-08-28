@@ -59,18 +59,40 @@ def _tool(name: str, description: str, properties: dict[str, Any], required: lis
 
 
 _scope_schema = {"type": "string", "enum": ["personal", "business", "unknown"]}
+_expense_change_properties: dict[str, Any] = {
+    "expense_date": {"type": "string", "description": "ISO date in YYYY-MM-DD format."},
+    "merchant": {"type": "string"},
+    "original_amount": {"type": "string"},
+    "original_currency": {"type": "string"},
+    "scope": _scope_schema,
+    "memo": {"type": "string"},
+    "location": {"type": "string"},
+    "category_id": {"type": "string"},
+    "category_code": {"type": "string"},
+    "payment_method_id": {"type": "string"},
+    "payment_method": {
+        "type": "string",
+        "description": "Exact human-readable payment method name, such as Cash.",
+    },
+    "category_reason": {"type": "string"},
+}
+_expense_changes_schema = {
+    "type": "object",
+    "properties": _expense_change_properties,
+    "additionalProperties": False,
+}
 CHAT_TOOL_CONTRACT: list[dict[str, Any]] = [
     _tool("search_expenses", "Search non-deleted expenses; never guess a record id.", {"query": {"type": "string"}, "date_from": {"type": "string"}, "date_to": {"type": "string"}, "scope": _scope_schema, "limit": {"type": "integer", "minimum": 1, "maximum": 50}}),
     _tool("inspect_expense", "Read one expense by id, or the active receipt expense using active=true.", {"expense_id": {"type": "string"}, "active": {"type": "boolean"}}),
     _tool("summarize_spending", "Calculate spending on the server for an inclusive date range and optional scope.", {"date_from": {"type": "string"}, "date_to": {"type": "string"}, "scope": _scope_schema, "group_by": {"type": "string", "enum": ["category", "merchant", "month"]}}),
-    _tool("create_expense", "Create one ordinary manual expense immediately; server tools calculate amounts.", {"expense_date": {"type": "string"}, "merchant": {"type": "string"}, "original_amount": {"type": "string"}, "original_currency": {"type": "string"}, "category_id": {"type": "string"}, "category_code": {"type": "string"}, "payment_method_id": {"type": "string"}, "scope": _scope_schema, "memo": {"type": "string"}}, ["expense_date", "merchant", "original_amount", "original_currency"]),
-    _tool("edit_expense", "Correct one existing expense immediately; use a specific id or active=true.", {"expense_id": {"type": "string"}, "active": {"type": "boolean"}, "changes": {"type": "object"}}, ["changes"]),
+    _tool("create_expense", "Create one ordinary manual expense immediately; server tools calculate amounts. Use payment_method for a human-readable name such as Cash, or payment_method_id for an exact id.", {"expense_date": {"type": "string"}, "merchant": {"type": "string"}, "original_amount": {"type": "string"}, "original_currency": {"type": "string"}, "category_id": {"type": "string"}, "category_code": {"type": "string"}, "payment_method_id": {"type": "string"}, "payment_method": {"type": "string"}, "scope": _scope_schema, "memo": {"type": "string"}}, ["expense_date", "merchant", "original_amount", "original_currency"]),
+    _tool("edit_expense", "Correct one existing expense immediately; use a specific id or active=true. In changes, use payment_method for a human-readable name such as Cash, or payment_method_id for an exact id.", {"expense_id": {"type": "string"}, "active": {"type": "boolean"}, "changes": _expense_changes_schema}, ["changes"]),
     _tool("manage_category", "Create or edit a category. Archiving requires confirmation.", {"action": {"type": "string", "enum": ["create", "edit", "archive"]}, "category_id": {"type": "string"}, "values": {"type": "object"}}, ["action"]),
     _tool("manage_payment_method", "Create or edit a payment method. Archiving requires confirmation.", {"action": {"type": "string", "enum": ["create", "edit", "archive"]}, "method_id": {"type": "string"}, "values": {"type": "object"}}, ["action"]),
     _tool("manage_merchant_rule", "Create or edit a merchant rule. Deleting it requires confirmation.", {"action": {"type": "string", "enum": ["create", "edit", "delete"]}, "rule_id": {"type": "string"}, "values": {"type": "object"}}, ["action"]),
     _tool("export_expenses", "Generate a CSV export and send it to the Telegram owner.", {"date_from": {"type": "string"}, "date_to": {"type": "string"}, "scope": _scope_schema}),
     _tool("delete_expense", "Request deletion of one expense; confirmation is always required.", {"expense_id": {"type": "string"}, "active": {"type": "boolean"}}),
-    _tool("bulk_edit_expenses", "Request the same change for several explicit ids; confirmation is always required.", {"expense_ids": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 50}, "changes": {"type": "object"}}, ["expense_ids", "changes"]),
+    _tool("bulk_edit_expenses", "Request the same change for several explicit ids; confirmation is always required.", {"expense_ids": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 50}, "changes": _expense_changes_schema}, ["expense_ids", "changes"]),
 ]
 
 
@@ -350,7 +372,9 @@ def _expense_dict(expense: Expense) -> dict[str, Any]:
         "merchant": expense.merchant, "original_amount": str(expense.original_amount) if expense.original_amount is not None else None,
         "original_currency": expense.original_currency, "amount_eur": str(expense.amount) if expense.amount is not None else None,
         "category": expense.category.name if expense.category else None,
-        "category_id": expense.category_id, "payment_method": expense.payment_method.name if expense.payment_method else None,
+        "category_id": expense.category_id,
+        "payment_method": expense.payment_method.name if expense.payment_method else None,
+        "payment_method_id": expense.payment_method_id,
         "scope": expense.scope.value, "memo": expense.memo, "status": expense.status.value,
         "categorization_source": expense.categorization_source, "category_reason": expense.category_reason,
     }
@@ -405,6 +429,55 @@ def _payment(db: Session, method_id: Any) -> PaymentMethod | None:
     return method
 
 
+def _payment_from_values(
+    db: Session,
+    values: dict[str, Any],
+) -> PaymentMethod | None:
+    has_id = "payment_method_id" in values
+    has_name = "payment_method" in values
+    method_from_id = _payment(db, values.get("payment_method_id")) if has_id else None
+    if not has_name:
+        return method_from_id
+
+    method_name = str(values.get("payment_method") or "").strip()
+    if not method_name:
+        if has_id and method_from_id:
+            raise ValueError(
+                "payment_method and payment_method_id refer to different methods"
+            )
+        return None
+    matches = list(
+        db.scalars(
+            select(PaymentMethod).where(
+                func.lower(PaymentMethod.name) == method_name.lower(),
+                PaymentMethod.archived.is_(False),
+            )
+        ).all()
+    )
+    if not matches:
+        active_names = list(
+            db.scalars(
+                select(PaymentMethod.name)
+                .where(PaymentMethod.archived.is_(False))
+                .order_by(PaymentMethod.name)
+            ).all()
+        )
+        available = ", ".join(active_names) or "none configured"
+        raise ValueError(
+            f"payment_method must match an active method name; available: {available}"
+        )
+    if len(matches) > 1:
+        raise ValueError(
+            "payment_method name is ambiguous; use payment_method_id instead"
+        )
+    method_from_name = matches[0]
+    if method_from_id and method_from_id.id != method_from_name.id:
+        raise ValueError(
+            "payment_method and payment_method_id refer to different methods"
+        )
+    return method_from_name
+
+
 def _parse_range(values: dict[str, Any]) -> tuple[date | None, date | None]:
     start = parse_date(str(values["date_from"])) if values.get("date_from") else None
     end = parse_date(str(values["date_to"])) if values.get("date_to") else None
@@ -423,7 +496,7 @@ def _create_expense(db: Session, values: dict[str, Any]) -> dict[str, Any]:
     if not expense_date or not amount or not merchant or len(currency) != 3:
         raise ValueError("date, merchant, amount, and a three-letter currency are required")
     category = _category(db, values)
-    payment = _payment(db, values.get("payment_method_id"))
+    payment = _payment_from_values(db, values)
     rate, rate_date = get_eur_rate(db, currency, expense_date)
     normalized_amount = (amount * rate).quantize(Decimal("0.01")) if rate is not None else None
     expense = Expense(
@@ -448,7 +521,7 @@ def _edit_expense(db: Session, session: ConversationSession, values: dict[str, A
     changes = values.get("changes")
     if not isinstance(changes, dict):
         raise ValueError("changes must be an object")
-    allowed = {"expense_date", "merchant", "original_amount", "original_currency", "scope", "memo", "location", "category_id", "category_code", "payment_method_id", "category_reason"}
+    allowed = set(_expense_change_properties)
     unknown = set(changes) - allowed
     if unknown:
         raise ValueError("unsupported expense fields: " + ", ".join(sorted(unknown)))
@@ -480,8 +553,8 @@ def _edit_expense(db: Session, session: ConversationSession, values: dict[str, A
         category = _category(db, changes)
         expense.category_id = category.id if category else None
         expense.quickbooks_category = category.quickbooks_category if category else None
-    if "payment_method_id" in changes:
-        method = _payment(db, changes["payment_method_id"])
+    if "payment_method_id" in changes or "payment_method" in changes:
+        method = _payment_from_values(db, changes)
         expense.payment_method_id = method.id if method else None
     if "category_reason" in changes:
         expense.category_reason = str(changes["category_reason"] or "")[:600] or None
@@ -490,7 +563,7 @@ def _edit_expense(db: Session, session: ConversationSession, values: dict[str, A
         expense.conversion_rate, expense.fx_rate_date = rate, rate_date
         expense.fx_estimated = bool(rate_date and rate_date != expense.expense_date)
         expense.amount = (Decimal(expense.original_amount) * rate).quantize(Decimal("0.01")) if rate else None
-    if {"category_id", "category_code", "payment_method_id", "scope", "category_reason"} & set(changes):
+    if {"category_id", "category_code", "payment_method_id", "payment_method", "scope", "category_reason"} & set(changes):
         expense.categorization_source = "manual"
         expense.category_reason = expense.category_reason or "Updated manually in Telegram."
     db.commit()

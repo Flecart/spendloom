@@ -1,13 +1,22 @@
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import select
 
 from receipt_ledger.api import dashboard, startup
 from receipt_ledger.config import get_settings
 from receipt_ledger.database import SessionLocal
-from receipt_ledger.models import Category, ConversationMessage, Expense, ExpenseScope, IngestionStatus
+from receipt_ledger.models import (
+    Category,
+    ConversationMessage,
+    Expense,
+    ExpenseScope,
+    IngestionStatus,
+    PaymentMethod,
+)
 from receipt_ledger.services.chat import (
+    CHAT_TOOL_CONTRACT,
     MAX_MESSAGES,
     consume_pending_action,
     execute_tool,
@@ -89,3 +98,68 @@ def test_missing_codex_runtime_fails_chat_job_once(monkeypatch) -> None:
         assert result.status == "failed"
         assert result.attempts == 1
         assert result.response_text == "AI access is not configured on the worker. Please check the server setup."
+
+
+def test_followup_can_change_active_expense_payment_method_by_name() -> None:
+    edit_contract = next(
+        tool for tool in CHAT_TOOL_CONTRACT if tool["name"] == "edit_expense"
+    )
+    change_properties = edit_contract["parameters"]["properties"]["changes"][
+        "properties"
+    ]
+    assert "payment_method" in change_properties
+
+    startup()
+    with SessionLocal() as db:
+        expense = _expense(db, date(2026, 8, 27), "4")
+        session = get_or_create_session(db, "payment-chat", "payment-owner")
+        session.active_expense_id = expense.id
+        db.commit()
+        job = queue_chat_job(
+            db,
+            "payment-chat",
+            "payment-owner",
+            "payment-message",
+            "change the payment method to cash",
+        )
+
+        result = execute_tool(
+            db,
+            session,
+            job,
+            "edit_expense",
+            {"active": True, "changes": {"payment_method": "cash"}},
+        )
+
+        cash = db.scalar(select(PaymentMethod).where(PaymentMethod.name == "Cash"))
+        db.refresh(expense)
+        assert cash is not None
+        assert expense.payment_method_id == cash.id
+        assert result["expense"]["payment_method"] == "Cash"
+        assert result["expense"]["payment_method_id"] == cash.id
+        assert expense.categorization_source == "manual"
+
+
+def test_payment_method_name_error_lists_active_choices() -> None:
+    startup()
+    with SessionLocal() as db:
+        expense = _expense(db, date(2026, 8, 27), "5")
+        session = get_or_create_session(db, "bad-payment-chat", "payment-owner")
+        session.active_expense_id = expense.id
+        db.commit()
+        job = queue_chat_job(
+            db,
+            "bad-payment-chat",
+            "payment-owner",
+            "bad-payment-message",
+            "change the payment method",
+        )
+
+        with pytest.raises(ValueError, match="available:.*Cash"):
+            execute_tool(
+                db,
+                session,
+                job,
+                "edit_expense",
+                {"active": True, "changes": {"payment_method": "Not a method"}},
+            )
