@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: ENV_FILE=.env.example docker compose config
-      - run: docker build -t spendloom:ci .
+      - run: docker build --pull -t spendloom:ci .
       - uses: returntocorp/semgrep-action@v1
         with: { config: p/default }
       - uses: aquasecurity/trivy-action@v0.36.0

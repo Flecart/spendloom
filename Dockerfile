@@ -7,7 +7,8 @@ RUN npm run build
 
 FROM python:3.12-alpine3.23 AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-RUN apk add --no-cache poppler-utils curl
+RUN apk upgrade --no-cache \
+    && apk add --no-cache poppler-utils curl
 WORKDIR /app
 COPY pyproject.toml README.md alembic.ini ./
 COPY alembic ./alembic
