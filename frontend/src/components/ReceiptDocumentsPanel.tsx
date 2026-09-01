@@ -48,12 +48,19 @@ export default function ReceiptDocumentsPanel({
         {documents.map((document, index) => (
           <Button
             key={document.receipt_id}
+            className="receipt-document-selector"
             variant={index === selectedIndex ? "contained" : "outlined"}
             onClick={() => setSelectedIndex(index)}
-            sx={{ justifyContent: "space-between" }}
           >
-            <span>{index + 1}. {document.filename}</span>
-            <span>{(document.size_bytes / 1024 / 1024).toFixed(1)} MB</span>
+            <span
+              className="receipt-document-filename"
+              title={document.filename}
+            >
+              {index + 1}. {document.filename}
+            </span>
+            <span className="receipt-document-size">
+              {(document.size_bytes / 1024 / 1024).toFixed(1)} MB
+            </span>
           </Button>
         ))}
       </Stack>

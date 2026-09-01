@@ -11,6 +11,9 @@ button, input { font: inherit; }
 .drop-zone { border: 2px dashed #d9b5ad; border-radius: 24px; padding: 36px; text-align: center; background: #fff8ee; transition: .2s ease; cursor: pointer; }
 .drop-zone:hover, .drop-zone.dragging { border-color: #7a365d; background: #f8e6dd; transform: translateY(-1px); }
 .receipt-preview { width: 100%; height: min(70vh, 760px); object-fit: contain; border-radius: 18px; background: #eeeaf2; }
+.receipt-document-selector { width: 100%; min-width: 0; gap: 12px; justify-content: space-between !important; }
+.receipt-document-filename { min-width: 0; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.receipt-document-size { flex-shrink: 0; }
 .status-dot { width: 8px; height: 8px; display: inline-block; border-radius: 50%; margin-right: 7px; }
 .empty-state { text-align: center; padding: 64px 20px; color: #6d6874; }
 @media (max-width: 760px) {
