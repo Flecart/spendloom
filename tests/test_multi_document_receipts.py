@@ -21,6 +21,10 @@ from receipt_ledger.models import (
     Expense,
     ExpenseScope,
     IngestionStatus,
+    RecurrenceFrequency,
+    RecurringEntryType,
+    RecurringItem,
+    RecurringOccurrence,
 )
 from receipt_ledger.schemas import (
     IngestionOut,
@@ -37,6 +41,7 @@ from receipt_ledger.services.ingestion import (
     schedule_ingestion,
 )
 from receipt_ledger.services.processing import process_ingestion
+from receipt_ledger.services.finance import materialize_occurrences
 
 
 def jpeg(color: str) -> bytes:
@@ -312,6 +317,43 @@ def test_web_upload_can_group_files_or_keep_them_separate() -> None:
         assert IngestionOut.model_validate(grouped[0]).document_count == 2
         assert len(separate) == 2
         assert separate[0].id != separate[1].id
+
+
+def test_web_upload_can_link_a_pending_recurring_expense() -> None:
+    startup()
+    with SessionLocal() as db:
+        item = RecurringItem(
+            name="Office rent",
+            entry_type=RecurringEntryType.expense,
+            counterparty="Landlord",
+            expected_amount=Decimal("950.00"),
+            currency="EUR",
+            frequency=RecurrenceFrequency.monthly,
+            start_date=date.today(),
+            reminder_days_before=3,
+            scope=ExpenseScope.business,
+        )
+        db.add(item)
+        db.commit()
+        materialize_occurrences(db)
+        occurrence = db.scalar(
+            select(RecurringOccurrence).where(
+                RecurringOccurrence.recurring_item_id == item.id
+            )
+        )
+
+        uploaded = asyncio.run(
+            upload_receipts(
+                None,
+                db,
+                [upload_file("rent.jpg", "navy")],
+                "September rent",
+                False,
+                occurrence.id,
+            )
+        )
+
+        assert uploaded[0].recurring_occurrence_id == occurrence.id
 
 
 def test_reprocessing_fills_gaps_without_replacing_existing_values(monkeypatch) -> None:
