@@ -19,6 +19,7 @@ flowchart LR
     Worker --> Files
     Worker -->|receipt images + schema| AI[OpenAI / Anthropic / Gemini / Codex CLI]
     Worker -->|historical exchange rate| ECB[ECB data API]
+    Worker -->|read-only exact-sender sync| Gmail[Gmail API]
     Worker -->|expense + status| DB
     Bot -->|plain text chat job| DB
     Worker -->|bounded chat + validated tools| AI
@@ -109,6 +110,20 @@ The React frontend calls the same-origin FastAPI API. It provides the overview, 
 
 Accepted expenses feed dashboard totals and the Ramp-shaped CSV export. The database keeps the original currency values, normalized EUR amount, applied conversion rate, source receipt, confidence, scope, and QuickBooks mapping fields so exports do not need to reconstruct history.
 
+## Recurring finance and receivables
+
+Recurring items materialize dated occurrences without posting money. The worker evaluates the configured local reminder time and sends a lead-time prompt, a due-date prompt, then a weekly overdue prompt. Recording an expected or actual amount creates an accepted manual expense or income entry; receipt-backed expenses complete only after review acceptance.
+
+Contracts are lightweight metadata and document containers. Income entries retain original and base-currency amounts. Invoices represent externally issued receivables, and same-currency allocation rows connect income payments to invoice balances. Invoice status is derived from allocations, due date, and the explicit void flag.
+
+Supporting documents use a separate store and explicit, database-constrained links. Existing receipt records and APIs remain unchanged.
+
+## Gmail receipt intake
+
+Gmail is optional and uses server-side read-only OAuth with an encrypted offline refresh token. The first connection stores the current history checkpoint, so only future mail is considered. The worker uses incremental Gmail history synchronization and a bounded recovery scan if the checkpoint expires.
+
+Message metadata is checked against an exact enabled sender rule before full content is fetched. Supported PDF/image attachments and a sanitized plain-text rendition of the subject/body become one logical receipt. No email URL or remote resource is fetched. Gmail message IDs, attachment IDs, and receipt content hashes make retries idempotent.
+
 ## Data model
 
 The main records have different responsibilities:
@@ -124,6 +139,11 @@ The main records have different responsibilities:
 | `FxRate` | Cached ECB rate and effective date. |
 | `AppSetting` | Owner preferences, password hash, review policy, and Telegram ownership. |
 | `AuditEvent` | Important expense creation, update, and deletion events. |
+| `RecurringItem` / `RecurringOccurrence` | Expected expense or income schedules and their independently resolved due dates. |
+| `IncomeEntry` | Confirmed money received, with FX and optional contract provenance. |
+| `Contract` / `Invoice` / `InvoiceAllocation` | Agreements and externally issued receivables with partial payment allocation. |
+| `SupportingDocument` / `DocumentLink` | PDF/image evidence attached to financial records. |
+| `GmailConnection` / `GmailSenderRule` | Encrypted mailbox connection state and exact sender allowlist. |
 
 A receipt can have multiple ingestion records—for example, if the same file is submitted twice—but an ingestion points to at most one expense. Expense deletion is soft deletion, so audit history remains available.
 
@@ -146,6 +166,7 @@ This is an at-least-once intake design with idempotency at the application bound
 - Login attempts are rate-limited in memory per client address.
 - The Telegram bot accepts private chats only. A one-time claim code binds it to one numeric Telegram user ID; `TELEGRAM_ALLOWED_USER_ID` can additionally make one configured account authoritative for every message, callback, claim, and owner recovery.
 - File type is checked from content rather than trusting its extension.
+- Gmail content is read with a restricted read-only credential, exact sender checks, bounded body text, and no remote-resource fetching. The OAuth grant itself cannot be limited by sender.
 - API keys and the bot token live in server environment variables and are never sent to the browser.
 - Containers run with the host's configured unprivileged `PUID` and `PGID`.
 

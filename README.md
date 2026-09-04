@@ -15,6 +15,9 @@ Spendloom is a private, self-hosted receipt inbox and spending companion for one
 - Review uncertain records, remember merchant rules, normalise to EUR, and export Ramp-shaped CSV.
 - Ask Telegram to find, total, create, or correct expenses. Calculations and database writes stay on the server.
 - Keep data in your own SQLite database and receipt directory.
+- Track confirmed income, recurring expenses or earnings, contracts, and external invoices without changing the receipt ledger.
+- Allocate partial or full income payments to invoices and see cash flow, outstanding receivables, and upcoming obligations.
+- Optionally import receipt attachments and sanitized email text from exact allowlisted Gmail senders.
 
 ## AI provider matrix
 
@@ -66,6 +69,25 @@ The web service accepts files and runs migrations, the worker performs extractio
 
 Read the [architecture notes](docs/architecture.md) for the receipt lifecycle, failure model, and backup design.
 
+## Recurring finance and Gmail
+
+Recurring items support weekly, monthly, quarterly, and yearly due dates. They create upcoming occurrences and Telegram reminders, but no expense or income is recorded until you confirm an amount, submit a receipt, or explicitly skip the occurrence. The reminder time is editable in Settings and uses `TIMEZONE`.
+
+Income can be linked to a lightweight contract. The receivables register stores externally issued invoice totals and due dates; allocations connect one or more same-currency income payments to an invoice and derive its unpaid, partial, paid, or overdue state. Spendloom does not generate legal invoices or calculate taxes.
+
+The optional Gmail importer requires a Google OAuth web client and these settings:
+
+```dotenv
+GMAIL_CLIENT_ID=your-google-oauth-client-id
+GMAIL_CLIENT_SECRET=your-google-oauth-client-secret
+GMAIL_TOKEN_ENCRYPTION_KEY=a-separate-long-random-secret
+GMAIL_SYNC_MINUTES=5
+```
+
+Register `${APP_ORIGIN}/api/integrations/gmail/oauth/callback` as the OAuth callback, restart the web and worker services, then connect Gmail under Settings → Gmail. Add exact sender addresses such as `noreply@iliad.it`; new matching messages are imported after connection, with no historical backfill.
+
+Spendloom requests Gmail read-only access. Google does not provide sender-scoped OAuth, so the credential technically permits mailbox-wide reading even though Spendloom fetches content only after an exact sender-rule match. Email links, scripts, and remote images are never fetched. The refresh token is encrypted in the database; securely retain `GMAIL_TOKEN_ENCRYPTION_KEY` separately from data backups.
+
 ## Install
 
 On Ubuntu/Debian/Mint, Fedora/RHEL/Rocky/Alma, or Arch/Manjaro:
@@ -111,7 +133,7 @@ cd frontend && npm install && npm run build
 
 Run `docker compose exec web python -m receipt_ledger.backup /data/backups` for a transactionally consistent database-and-files archive. Store it encrypted elsewhere.
 
-Spendloom is home-hosted and single-user. It does not transcribe voice notes, accept arbitrary documents as chat input, synchronise QuickBooks, calculate tax, or provide financial advice. Planned work includes richer review shortcuts, more export mappings, accessibility refinement, and optional encrypted off-site backup guidance.
+Spendloom is home-hosted and single-user. It does not transcribe voice notes, synchronise QuickBooks, calculate tax, generate jurisdiction-compliant invoices, value stocks or other assets, or provide financial advice. Planned work includes richer review shortcuts, asset tracking, more export mappings, accessibility refinement, and optional encrypted off-site backup guidance.
 
 ## Contributing and support
 
