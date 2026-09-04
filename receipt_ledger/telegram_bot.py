@@ -13,7 +13,16 @@ from sqlalchemy import select
 from .config import get_settings
 from .database import SessionLocal, init_database
 from .logging_config import configure_logging
-from .models import AppSetting, ChatJob, Expense, Ingestion, IngestionStatus
+from .models import (
+    AppSetting,
+    ChatJob,
+    Expense,
+    Ingestion,
+    IngestionStatus,
+    OccurrenceStatus,
+    RecurringEntryType,
+    RecurringOccurrence,
+)
 from .services.chat import (
     attach_processed_expense,
     anchor_receipt,
@@ -33,6 +42,12 @@ from .services.ingestion import (
     ingest_bytes,
     ingestion_documents,
     resolve_receipt_grouping_choice,
+)
+from .services.documents import attach_document
+from .services.finance import (
+    complete_occurrence,
+    mark_reminder_sent,
+    next_reminder_occurrence,
 )
 from .services.storage import ALLOWED_MIMES, InvalidReceiptFile
 
@@ -207,6 +222,14 @@ class TelegramBot:
         if len(parts) != 3 or parts[0] != "spendloom":
             self.send(chat_id, "That action is no longer available.")
             return
+        if parts[1].startswith("occ-"):
+            self.handle_occurrence_callback(
+                chat_id,
+                user_id,
+                parts[1],
+                parts[2],
+            )
+            return
         if parts[1] in {"receipt-add", "receipt-new"}:
             with SessionLocal() as db:
                 ingestion, start_new, result = resolve_receipt_grouping_choice(
@@ -233,6 +256,56 @@ class TelegramBot:
         with SessionLocal() as db:
             result = consume_pending_action(db, parts[2], chat_id, user_id, parts[1] == "confirm")
         self.send(chat_id, result)
+
+    def handle_occurrence_callback(
+        self,
+        chat_id: int,
+        user_id: int,
+        action: str,
+        occurrence_id: str,
+    ) -> None:
+        with SessionLocal() as db:
+            occurrence = db.get(RecurringOccurrence, occurrence_id)
+            if not occurrence or occurrence.status != OccurrenceStatus.pending:
+                self.send(chat_id, "That recurring item is no longer pending.")
+                return
+            if action == "occ-attach":
+                session = get_or_create_session(db, chat_id, user_id)
+                session.active_occurrence_id = occurrence.id
+                session.attachment_target_type = "occurrence"
+                session.attachment_target_id = occurrence.id
+                db.commit()
+                self.send(
+                    chat_id,
+                    "Send the receipt or supporting document now. You can also reply with the actual amount.",
+                )
+                return
+            if action == "occ-snooze":
+                occurrence.snoozed_until = datetime.now(timezone.utc).date() + timedelta(days=7)
+                db.commit()
+                self.send(chat_id, "Snoozed for seven days.")
+                return
+            if action == "occ-skip":
+                occurrence.status = OccurrenceStatus.skipped
+                occurrence.completed_at = datetime.now(timezone.utc)
+                db.commit()
+                self.send(chat_id, "Skipped this occurrence. Future occurrences are unchanged.")
+                return
+            if action == "occ-record":
+                try:
+                    result = complete_occurrence(
+                        db,
+                        self.settings,
+                        occurrence,
+                        amount=None,
+                        occurred_on=None,
+                    )
+                except ValueError as exc:
+                    self.send(chat_id, str(exc))
+                    return
+                self.send(chat_id, result)
+                return
+        self.send(chat_id, "That action is no longer available.")
 
     def is_owner(self, user_id: int) -> bool:
         if not self.is_allowed_user(user_id):
@@ -299,9 +372,11 @@ class TelegramBot:
         with SessionLocal() as db:
             state = context_status(db, chat_id, user_id)
         active = state["expense_id"] or state["ingestion_id"] or "none"
+        recurring = state["occurrence_id"] or "none"
         self.send(
             chat_id,
             f"Active receipt/expense: {active}\n"
+            f"Active recurring occurrence: {recurring}\n"
             f"Documents: {state['document_count']}\n"
             f"Retained messages: {state['retained_messages']} of {16} maximum.",
         )
@@ -339,6 +414,51 @@ class TelegramBot:
             response = self.client.get(f"{self.file_url}/{file_info['file_path']}", timeout=45)
             response.raise_for_status()
             external_id = f"{chat_id}:{message.get('message_id')}:{unique_id}"
+            target_occurrence_id: str | None = None
+            with SessionLocal() as target_db:
+                target_session = get_or_create_session(target_db, chat_id, user_id)
+                target_type = target_session.attachment_target_type
+                target_id = target_session.attachment_target_id
+                if target_type and target_id:
+                    if target_type == "occurrence":
+                        occurrence = target_db.get(RecurringOccurrence, target_id)
+                        if not occurrence or occurrence.status != OccurrenceStatus.pending:
+                            target_session.attachment_target_type = None
+                            target_session.attachment_target_id = None
+                            target_session.active_occurrence_id = None
+                            target_db.commit()
+                        elif occurrence.recurring_item.entry_type == RecurringEntryType.expense:
+                            target_occurrence_id = occurrence.id
+                        else:
+                            attach_document(
+                                target_db,
+                                self.settings,
+                                data=response.content,
+                                filename=filename,
+                                claimed_mime=mime,
+                                target_type="occurrence",
+                                target_id=occurrence.id,
+                            )
+                            self.send(
+                                chat_id,
+                                "Income document attached. Reply with the received amount to complete this occurrence.",
+                            )
+                            return
+                    elif target_type in {"contract", "income", "invoice"}:
+                        attach_document(
+                            target_db,
+                            self.settings,
+                            data=response.content,
+                            filename=filename,
+                            claimed_mime=mime,
+                            target_type=target_type,
+                            target_id=target_id,
+                        )
+                        target_session.attachment_target_type = None
+                        target_session.attachment_target_id = None
+                        target_db.commit()
+                        self.send(chat_id, f"Document attached to {target_type}.")
+                        return
             media_group_id = str(message.get("media_group_id") or "").strip()
             group_external_id = (
                 f"{chat_id}:album:{media_group_id}"
@@ -367,10 +487,13 @@ class TelegramBot:
                 is_first_document = existing_group is None
                 has_active_target = bool(
                     is_first_document
+                    and not target_occurrence_id
                     and active_ingestion
                     and active_ingestion.status != IngestionStatus.cancelled
                 )
-                if has_active_target:
+                if target_occurrence_id:
+                    ready_at = now + RECEIPT_SETTLE_AGE
+                elif has_active_target:
                     ready_at = now + RECEIPT_GROUPING_AGE
                 elif existing_group and existing_group.merged_into_ingestion_id:
                     ready_at = now + RECEIPT_SETTLE_AGE
@@ -398,6 +521,12 @@ class TelegramBot:
                     ready_at=ready_at,
                 )
                 document_count = len(ingestion_documents(db, ingestion.id))
+                if target_occurrence_id:
+                    ingestion.recurring_occurrence_id = target_occurrence_id
+                    session.active_occurrence_id = target_occurrence_id
+                    session.attachment_target_type = None
+                    session.attachment_target_id = None
+                    db.commit()
                 grouping_action = None
                 if (
                     ingestion.status != IngestionStatus.duplicate
@@ -500,7 +629,13 @@ def notify_completed(ingestion_id: str) -> None:
         return
     with SessionLocal() as db:
         item = db.get(Ingestion, ingestion_id)
-        if not item or item.source != "telegram" or not item.source_chat_id or item.notification_sent_at:
+        if not item or item.source not in {"telegram", "gmail"} or item.notification_sent_at:
+            return
+        destination = item.source_chat_id
+        if item.source == "gmail":
+            owner = db.get(AppSetting, "telegram_owner_id")
+            destination = owner.value if owner else None
+        if not destination:
             return
         expense = db.get(Expense, item.expense_id) if item.expense_id else None
         attach_processed_expense(db, item)
@@ -514,7 +649,9 @@ def notify_completed(ingestion_id: str) -> None:
         else:
             return
         bot = TelegramBot()
-        bot.send(item.source_chat_id, text)
+        if item.source == "gmail":
+            text = f"Imported from Gmail\n{text}"
+        bot.send(destination, text)
         item.notification_sent_at = time_to_datetime()
         db.commit()
 
@@ -566,6 +703,63 @@ def notify_chat_completed(job_id: str) -> None:
 def time_to_datetime():
     from datetime import datetime, timezone
     return datetime.now(timezone.utc)
+
+
+def notify_recurring_due() -> str | None:
+    settings = get_settings()
+    if not settings.telegram_bot_token:
+        return None
+    with SessionLocal() as db:
+        owner = db.get(AppSetting, "telegram_owner_id")
+        if not owner:
+            return None
+        candidate = next_reminder_occurrence(db, settings)
+        if not candidate:
+            return None
+        occurrence, reminder_type = candidate
+        item = occurrence.recurring_item
+        amount = (
+            f"{occurrence.expected_amount} {occurrence.currency}"
+            if occurrence.expected_amount is not None
+            else "variable amount"
+        )
+        timing = {
+            "lead": f"due {occurrence.due_date.isoformat()}",
+            "due": "due today",
+            "overdue": f"overdue since {occurrence.due_date.isoformat()}",
+        }[reminder_type]
+        buttons: list[list[dict]] = []
+        if occurrence.expected_amount is not None:
+            buttons.append([
+                {
+                    "text": "Record expected amount",
+                    "callback_data": f"spendloom:occ-record:{occurrence.id}",
+                }
+            ])
+        buttons.append([
+            {
+                "text": "Attach / respond",
+                "callback_data": f"spendloom:occ-attach:{occurrence.id}",
+            },
+            {
+                "text": "Snooze 7 days",
+                "callback_data": f"spendloom:occ-snooze:{occurrence.id}",
+            },
+        ])
+        buttons.append([
+            {
+                "text": "Skip this occurrence",
+                "callback_data": f"spendloom:occ-skip:{occurrence.id}",
+            }
+        ])
+        TelegramBot().send(
+            owner.value,
+            f"Recurring {item.entry_type.value}: {item.name}\n"
+            f"{item.counterparty} · {amount} · {timing}",
+            buttons,
+        )
+        mark_reminder_sent(db, occurrence, reminder_type)
+        return occurrence.id
 
 
 def main() -> None:

@@ -9,6 +9,7 @@ from .logging_config import configure_logging
 from .services.codex_cli import validate_codex_runtime
 from .services.processing import process_next
 from .services.chat import process_next_chat
+from .services.gmail import sync_due_connection
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +24,7 @@ def main() -> None:
         with SessionLocal() as db:
             processed = process_next(db, settings)
             chat_job = None if processed else process_next_chat(db, settings)
+            sync_due_connection(db, settings)
         if processed:
             try:
                 from .telegram_bot import notify_completed
@@ -37,6 +39,12 @@ def main() -> None:
                 notify_chat_completed(chat_job.id)
             except Exception:
                 logger.exception("Unable to send Telegram chat response")
+        try:
+            from .telegram_bot import notify_recurring_due
+
+            notify_recurring_due()
+        except Exception:
+            logger.exception("Unable to send recurring Telegram reminder")
         if not processed and not chat_job:
             time.sleep(2)
 

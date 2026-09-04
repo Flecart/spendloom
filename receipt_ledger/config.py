@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     telegram_allowed_user_id: str | None = None
     telegram_poll_timeout: int = 30
 
+    gmail_client_id: str | None = None
+    gmail_client_secret: str | None = None
+    gmail_token_encryption_key: str | None = None
+    gmail_sync_minutes: int = Field(default=5, ge=1, le=1440)
+
     cookie_secure: bool = False
     log_level: str = "INFO"
 
@@ -59,6 +64,18 @@ class Settings(BaseSettings):
         return self.data_dir / "previews"
 
     @property
+    def documents_dir(self) -> Path:
+        return self.data_dir / "documents"
+
+    @property
+    def gmail_configured(self) -> bool:
+        return bool(
+            self.gmail_client_id
+            and self.gmail_client_secret
+            and self.gmail_token_encryption_key
+        )
+
+    @property
     def resolved_chat_model(self) -> str:
         return self.chat_model or self.ai_model
 
@@ -69,4 +86,5 @@ def get_settings() -> Settings:
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     settings.receipts_dir.mkdir(parents=True, exist_ok=True)
     settings.previews_dir.mkdir(parents=True, exist_ok=True)
+    settings.documents_dir.mkdir(parents=True, exist_ok=True)
     return settings

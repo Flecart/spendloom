@@ -59,6 +59,7 @@ def seed_database(session: Session) -> None:
         "owner_email": "",
         "review_mode": "uncertain",
         "confidence_threshold": "0.88",
+        "reminder_time": "09:00",
         "telegram_claim_code": secrets.token_hex(3).upper(),
     }
     existing = set(session.scalars(select(AppSetting.key)).all())

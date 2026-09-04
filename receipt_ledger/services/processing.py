@@ -15,13 +15,18 @@ from ..models import (
     Category,
     Expense,
     ExpenseScope,
+    GmailMessageImport,
+    GmailSenderRule,
     Ingestion,
     IngestionStatus,
     MerchantRule,
     PaymentMethod,
+    OccurrenceStatus,
+    RecurringOccurrence,
 )
 from ..schemas import ReceiptExtraction
 from .codex_cli import CodexInvocationError
+from .documents import move_occurrence_documents
 from .extraction import ProviderNotConfigured, build_prompt, provider_for
 from .fx import get_eur_rate
 from .ingestion import ensure_ingestion_documents
@@ -268,6 +273,22 @@ def _create_expense(
         if rule.scope:
             scope = rule.scope
 
+    if ingestion.gmail_message_import_id:
+        gmail_import = db.get(GmailMessageImport, ingestion.gmail_message_import_id)
+        sender_rule = (
+            db.get(GmailSenderRule, gmail_import.sender_rule_id)
+            if gmail_import
+            else None
+        )
+        if sender_rule:
+            if sender_rule.category_id:
+                category = db.get(Category, sender_rule.category_id)
+            if sender_rule.scope:
+                scope = sender_rule.scope
+            if sender_rule.category_id or sender_rule.scope:
+                categorization_source = "gmail_sender_rule"
+                category_reason = f"Matched Gmail sender rule for {sender_rule.sender_address}."
+
     normalized_amount = None
     conversion_rate = None
     fx_date = None
@@ -332,6 +353,13 @@ def _create_expense(
             category_reason=category_reason,
         )
         existing_expense.status = IngestionStatus.needs_review
+        if ingestion.recurring_occurrence_id:
+            occurrence = db.get(
+                RecurringOccurrence,
+                ingestion.recurring_occurrence_id,
+            )
+            if occurrence:
+                occurrence.actual_expense_id = existing_expense.id
         ingestion.status = IngestionStatus.needs_review
         ingestion.processed_at = datetime.now(timezone.utc)
         db.add(
@@ -373,6 +401,14 @@ def _create_expense(
     ingestion.expense_id = expense.id
     ingestion.status = status
     ingestion.processed_at = datetime.now(timezone.utc)
+    if ingestion.recurring_occurrence_id:
+        occurrence = db.get(RecurringOccurrence, ingestion.recurring_occurrence_id)
+        if occurrence:
+            occurrence.actual_expense_id = expense.id
+            if status == IngestionStatus.accepted:
+                occurrence.status = OccurrenceStatus.completed
+                occurrence.completed_at = datetime.now(timezone.utc)
+                move_occurrence_documents(db, occurrence.id, "expense", expense.id)
     db.add(AuditEvent(entity_type="expense", entity_id=expense.id, action="created", details={"source": ingestion.source}))
     db.commit()
 

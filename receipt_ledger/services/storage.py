@@ -76,6 +76,10 @@ def prepare_visuals(settings: Settings, receipt_id: str, storage_path: str, mime
     pages: list[tuple[bytes, str]] = []
     extracted_text = ""
 
+    if mime_type == "text/plain":
+        extracted_text = source.read_text(encoding="utf-8", errors="replace")[:20_000]
+        return pages, None, 1, extracted_text
+
     if mime_type == "application/pdf":
         with tempfile.TemporaryDirectory(prefix="receipt-pdf-") as tmp:
             prefix = Path(tmp) / "page"

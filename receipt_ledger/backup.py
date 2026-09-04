@@ -29,6 +29,8 @@ def create_backup(output_dir: Path) -> Path:
             bundle.add(settings.receipts_dir, arcname="receipts")
         if settings.previews_dir.is_dir():
             bundle.add(settings.previews_dir, arcname="previews")
+        if settings.documents_dir.is_dir():
+            bundle.add(settings.documents_dir, arcname="documents")
     temporary_db.unlink()
     return archive
 

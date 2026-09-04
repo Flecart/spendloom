@@ -6,9 +6,11 @@ from sqlalchemy.orm import Session, joinedload
 from ..config import Settings
 from ..models import Expense, Ingestion, IngestionDocument
 from ..schemas import ExpenseOut, MerchantRuleOut, ReceiptDocumentOut
+from .documents import documents_for
 
 
 def expense_out(db: Session, settings: Settings, expense: Expense) -> ExpenseOut:
+    supporting_documents = documents_for(db, "expense", expense.id)
     rows = list(
         db.execute(
             select(IngestionDocument, Ingestion)
@@ -85,6 +87,7 @@ def expense_out(db: Session, settings: Settings, expense: Expense) -> ExpenseOut
         ingestion_id=primary_ingestion.id if primary_ingestion else None,
         document_count=len(documents),
         documents=documents,
+        supporting_documents=supporting_documents,
         created_at=expense.created_at,
         updated_at=expense.updated_at,
     )

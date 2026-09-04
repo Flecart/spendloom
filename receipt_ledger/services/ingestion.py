@@ -131,12 +131,15 @@ def _receipt_for_bytes(
     data: bytes,
     filename: str,
     claimed_mime: str | None,
+    trusted_mime: str | None = None,
 ) -> tuple[Receipt, bool]:
     if len(data) > settings.max_upload_mb * 1024 * 1024:
         raise InvalidReceiptFile(
             f"File exceeds the {settings.max_upload_mb} MB upload limit"
         )
-    mime = sniff_mime(data, claimed_mime, filename)
+    if trusted_mime not in {None, "text/plain"}:
+        raise InvalidReceiptFile("Unsupported trusted document type")
+    mime = trusted_mime or sniff_mime(data, claimed_mime, filename)
     digest = sha256_bytes(data)
     existing = db.scalar(select(Receipt).where(Receipt.sha256 == digest))
     if existing:
@@ -167,6 +170,7 @@ def append_ingestion_document(
     source: str,
     external_id: str,
     caption: str | None = None,
+    trusted_mime: str | None = None,
 ) -> tuple[Ingestion, bool]:
     existing_ingestion = _existing_document_ingestion(db, source, external_id)
     if existing_ingestion:
@@ -180,6 +184,7 @@ def append_ingestion_document(
         data=data,
         filename=filename,
         claimed_mime=claimed_mime,
+        trusted_mime=trusted_mime,
     )
     already_attached = db.scalar(
         select(IngestionDocument).where(
@@ -255,6 +260,7 @@ def ingest_bytes(
     source_chat_id: str | None = None,
     group_external_id: str | None = None,
     ready_at: datetime | None = None,
+    trusted_mime: str | None = None,
 ) -> Ingestion:
     existing_document_ingestion = _existing_document_ingestion(db, source, external_id)
     if existing_document_ingestion:
@@ -277,6 +283,7 @@ def ingest_bytes(
             source=source,
             external_id=external_id,
             caption=caption,
+            trusted_mime=trusted_mime,
         )
         if added:
             schedule_ingestion(
@@ -292,6 +299,7 @@ def ingest_bytes(
         data=data,
         filename=filename,
         claimed_mime=claimed_mime,
+        trusted_mime=trusted_mime,
     )
     if not created:
         prior = db.scalar(

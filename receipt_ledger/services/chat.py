@@ -21,22 +21,32 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
-from ..config import Settings
+from ..config import Settings, get_settings
 from ..models import (
+    AuditEvent,
     Category,
     ChatJob,
+    Contract,
+    ContractStatus,
     ConversationMessage,
     ConversationSession,
     Expense,
     ExpenseScope,
+    IncomeEntry,
+    IncomeKind,
     Ingestion,
     IngestionStatus,
     MerchantRule,
+    Invoice,
+    OccurrenceStatus,
     PaymentMethod,
     PendingAction,
+    RecurringOccurrence,
 )
+from ..schemas import ContractCreate, IncomeCreate, InvoiceCreate
 from .codex_cli import CodexNotConfigured, run_codex
 from .fx import get_eur_rate
+from .finance import allocate_income, complete_occurrence, create_income_entry
 from .ingestion import ingestion_documents
 from .processing import normalize_merchant, parse_date, parse_decimal
 
@@ -93,6 +103,16 @@ CHAT_TOOL_CONTRACT: list[dict[str, Any]] = [
     _tool("export_expenses", "Generate a CSV export and send it to the Telegram owner.", {"date_from": {"type": "string"}, "date_to": {"type": "string"}, "scope": _scope_schema}),
     _tool("delete_expense", "Request deletion of one expense; confirmation is always required.", {"expense_id": {"type": "string"}, "active": {"type": "boolean"}}),
     _tool("bulk_edit_expenses", "Request the same change for several explicit ids; confirmation is always required.", {"expense_ids": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 50}, "changes": _expense_changes_schema}, ["expense_ids", "changes"]),
+    _tool("search_income", "Search recorded income by payer, memo, or date range.", {"query": {"type": "string"}, "date_from": {"type": "string"}, "date_to": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}}),
+    _tool("create_income", "Record received income and optionally complete a recurring income occurrence.", {"received_date": {"type": "string"}, "payer": {"type": "string"}, "amount": {"type": "string"}, "currency": {"type": "string"}, "kind": {"type": "string", "enum": ["salary", "contract", "rental", "interest", "refund", "other"]}, "contract_id": {"type": "string"}, "occurrence_id": {"type": "string"}, "active_occurrence": {"type": "boolean"}, "memo": {"type": "string"}}, ["received_date", "payer", "amount", "currency"]),
+    _tool("list_recurring_occurrences", "List unresolved recurring expense and income occurrences.", {"limit": {"type": "integer", "minimum": 1, "maximum": 50}}),
+    _tool("complete_recurring_occurrence", "Record the actual amount for a pending recurring occurrence. Use active=true after the user selected a reminder.", {"occurrence_id": {"type": "string"}, "active": {"type": "boolean"}, "amount": {"type": "string"}, "occurred_on": {"type": "string"}}),
+    _tool("set_attachment_target", "Make the next Telegram PDF/image attach to a contract, income, invoice, or pending recurring occurrence.", {"target_type": {"type": "string", "enum": ["contract", "income", "invoice", "occurrence"]}, "target_id": {"type": "string"}}, ["target_type", "target_id"]),
+    _tool("search_contracts", "Search active contract records by title, counterparty, or reference.", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}}),
+    _tool("manage_contract", "Create or edit a lightweight contract register entry.", {"action": {"type": "string", "enum": ["create", "edit"]}, "contract_id": {"type": "string"}, "values": {"type": "object"}}, ["action", "values"]),
+    _tool("search_invoices", "Search receivables by reference or client.", {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 50}}),
+    _tool("manage_invoice", "Create or edit an external invoice receivable. Values use ISO dates and decimal strings.", {"action": {"type": "string", "enum": ["create", "edit"]}, "invoice_id": {"type": "string"}, "values": {"type": "object"}}, ["action", "values"]),
+    _tool("allocate_invoice_payment", "Allocate recorded income to an invoice in the same currency.", {"invoice_id": {"type": "string"}, "income_id": {"type": "string"}, "amount": {"type": "string"}}, ["invoice_id", "income_id", "amount"]),
 ]
 
 
@@ -310,6 +330,9 @@ def reset_context(db: Session, chat_id: str | int, user_id: str | int) -> Conver
         db.delete(item)
     session.active_ingestion_id = None
     session.active_expense_id = None
+    session.active_occurrence_id = None
+    session.attachment_target_type = None
+    session.attachment_target_id = None
     db.commit()
     return session
 
@@ -330,6 +353,13 @@ def attach_processed_expense(db: Session, ingestion: Ingestion) -> None:
     session = db.scalar(select(ConversationSession).where(ConversationSession.telegram_chat_id == str(ingestion.source_chat_id)))
     if session and session.active_ingestion_id == ingestion.id:
         session.active_expense_id = ingestion.expense_id
+        if (
+            ingestion.status == IngestionStatus.accepted
+            and session.active_occurrence_id == ingestion.recurring_occurrence_id
+        ):
+            session.active_occurrence_id = None
+            session.attachment_target_type = None
+            session.attachment_target_id = None
         db.commit()
 
 
@@ -362,6 +392,9 @@ def context_status(db: Session, chat_id: str | int, user_id: str | int) -> dict[
         "ingestion_id": session.active_ingestion_id,
         "expense_id": session.active_expense_id,
         "document_count": document_count,
+        "occurrence_id": session.active_occurrence_id,
+        "attachment_target_type": session.attachment_target_type,
+        "attachment_target_id": session.attachment_target_id,
         "retained_messages": retained,
     }
 
@@ -714,6 +747,303 @@ def _request_confirmation(db: Session, session: ConversationSession, job: ChatJo
     return {"confirmation_required": True, "confirmation_token": action.token, "message": f"{label} needs your confirmation. It expires in 10 minutes."}
 
 
+def _search_income(db: Session, values: dict[str, Any]) -> list[dict[str, Any]]:
+    query = select(IncomeEntry).where(IncomeEntry.deleted_at.is_(None))
+    needle = str(values.get("query") or "").strip()
+    if needle:
+        pattern = f"%{needle}%"
+        query = query.where(
+            or_(IncomeEntry.payer.ilike(pattern), IncomeEntry.memo.ilike(pattern))
+        )
+    start, end = _parse_range(values)
+    if start:
+        query = query.where(IncomeEntry.received_date >= start)
+    if end:
+        query = query.where(IncomeEntry.received_date <= end)
+    limit = max(1, min(int(values.get("limit") or 20), 50))
+    items = db.scalars(
+        query.order_by(IncomeEntry.received_date.desc()).limit(limit)
+    ).all()
+    return [
+        {
+            "id": item.id,
+            "date": item.received_date.isoformat(),
+            "payer": item.payer,
+            "amount": str(item.original_amount),
+            "currency": item.original_currency,
+            "kind": item.kind.value,
+            "contract_id": item.contract_id,
+        }
+        for item in items
+    ]
+
+
+def _create_income_from_chat(
+    db: Session,
+    session: ConversationSession,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    amount = parse_decimal(str(values.get("amount") or ""))
+    received_date = parse_date(str(values.get("received_date") or ""))
+    if amount is None or received_date is None:
+        raise ValueError("income needs a valid date and positive amount")
+    occurrence_id = values.get("occurrence_id")
+    if values.get("active_occurrence"):
+        occurrence_id = session.active_occurrence_id
+    try:
+        kind = IncomeKind(str(values.get("kind") or "other"))
+    except ValueError as exc:
+        raise ValueError("invalid income kind") from exc
+    income = create_income_entry(
+        db,
+        get_settings(),
+        IncomeCreate(
+            received_date=received_date,
+            payer=str(values.get("payer") or "").strip(),
+            kind=kind,
+            original_amount=amount,
+            original_currency=str(values.get("currency") or "").strip(),
+            contract_id=str(values["contract_id"]) if values.get("contract_id") else None,
+            memo=str(values["memo"]) if values.get("memo") else None,
+            occurrence_id=str(occurrence_id) if occurrence_id else None,
+        ),
+    )
+    if occurrence_id == session.active_occurrence_id:
+        session.active_occurrence_id = None
+        session.attachment_target_type = None
+        session.attachment_target_id = None
+        db.commit()
+    return {
+        "id": income.id,
+        "payer": income.payer,
+        "amount": str(income.original_amount),
+        "currency": income.original_currency,
+    }
+
+
+def _pending_occurrences(db: Session, limit: int) -> list[dict[str, Any]]:
+    items = db.scalars(
+        select(RecurringOccurrence)
+        .where(RecurringOccurrence.status == OccurrenceStatus.pending)
+        .order_by(RecurringOccurrence.due_date)
+        .limit(limit)
+    ).all()
+    return [
+        {
+            "id": item.id,
+            "name": item.recurring_item.name,
+            "type": item.recurring_item.entry_type.value,
+            "due_date": item.due_date.isoformat(),
+            "expected_amount": str(item.expected_amount) if item.expected_amount is not None else None,
+            "currency": item.currency,
+        }
+        for item in items
+    ]
+
+
+def _complete_occurrence_from_chat(
+    db: Session,
+    session: ConversationSession,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    occurrence_id = session.active_occurrence_id if values.get("active") else values.get("occurrence_id")
+    occurrence = db.get(RecurringOccurrence, str(occurrence_id or ""))
+    if not occurrence:
+        raise ValueError("recurring occurrence not found")
+    amount = parse_decimal(str(values.get("amount") or "")) if values.get("amount") else None
+    occurred_on = parse_date(str(values.get("occurred_on") or "")) if values.get("occurred_on") else None
+    message = complete_occurrence(
+        db,
+        get_settings(),
+        occurrence,
+        amount=amount,
+        occurred_on=occurred_on,
+    )
+    if occurrence.id == session.active_occurrence_id:
+        session.active_occurrence_id = None
+        session.attachment_target_type = None
+        session.attachment_target_id = None
+        db.commit()
+    return {"message": message, "occurrence_id": occurrence.id}
+
+
+def _set_attachment_target(
+    db: Session,
+    session: ConversationSession,
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    target_type = str(values.get("target_type") or "")
+    target_id = str(values.get("target_id") or "")
+    models = {
+        "contract": Contract,
+        "income": IncomeEntry,
+        "invoice": Invoice,
+        "occurrence": RecurringOccurrence,
+    }
+    model = models.get(target_type)
+    target = db.get(model, target_id) if model else None
+    if not target or getattr(target, "deleted_at", None) is not None:
+        raise ValueError(f"{target_type or 'attachment target'} not found")
+    if target_type == "occurrence" and target.status != OccurrenceStatus.pending:
+        raise ValueError("recurring occurrence is already resolved")
+    session.attachment_target_type = target_type
+    session.attachment_target_id = target_id
+    session.active_occurrence_id = target_id if target_type == "occurrence" else None
+    db.commit()
+    return {"message": f"Send the document now; it will attach to this {target_type}."}
+
+
+def _search_contracts(db: Session, values: dict[str, Any]) -> list[dict[str, Any]]:
+    query = select(Contract).where(Contract.deleted_at.is_(None))
+    needle = str(values.get("query") or "").strip()
+    if needle:
+        pattern = f"%{needle}%"
+        query = query.where(
+            or_(
+                Contract.title.ilike(pattern),
+                Contract.counterparty.ilike(pattern),
+                Contract.reference.ilike(pattern),
+            )
+        )
+    limit = max(1, min(int(values.get("limit") or 20), 50))
+    items = db.scalars(query.order_by(Contract.updated_at.desc()).limit(limit)).all()
+    return [
+        {
+            "id": item.id,
+            "title": item.title,
+            "counterparty": item.counterparty,
+            "reference": item.reference,
+            "status": item.status.value,
+        }
+        for item in items
+    ]
+
+
+def _search_invoices(db: Session, values: dict[str, Any]) -> list[dict[str, Any]]:
+    query = select(Invoice).where(Invoice.deleted_at.is_(None))
+    needle = str(values.get("query") or "").strip()
+    if needle:
+        pattern = f"%{needle}%"
+        query = query.where(
+            or_(Invoice.reference.ilike(pattern), Invoice.client.ilike(pattern))
+        )
+    limit = max(1, min(int(values.get("limit") or 20), 50))
+    items = db.scalars(query.order_by(Invoice.due_date.desc()).limit(limit)).all()
+    return [
+        {
+            "id": item.id,
+            "reference": item.reference,
+            "client": item.client,
+            "due_date": item.due_date.isoformat(),
+            "total": str(item.total),
+            "currency": item.currency,
+            "voided": item.voided,
+        }
+        for item in items
+    ]
+
+
+def _manage_contract(db: Session, values: dict[str, Any]) -> dict[str, Any]:
+    action = str(values.get("action") or "")
+    data = values.get("values")
+    if not isinstance(data, dict):
+        raise ValueError("contract values must be an object")
+    if action == "create":
+        payload = ContractCreate(
+            title=str(data.get("title") or ""),
+            counterparty=str(data.get("counterparty") or ""),
+            reference=str(data["reference"]) if data.get("reference") else None,
+            start_date=parse_date(str(data.get("start_date") or "")),
+            end_date=parse_date(str(data.get("end_date") or "")),
+            status=ContractStatus(str(data.get("status") or "active")),
+            notes=str(data["notes"]) if data.get("notes") else None,
+        )
+        contract = Contract(**payload.model_dump())
+        db.add(contract)
+        db.flush()
+        db.add(AuditEvent(entity_type="contract", entity_id=contract.id, action="created"))
+        db.commit()
+        db.refresh(contract)
+        return {"id": contract.id, "title": contract.title, "action": "created"}
+    if action == "edit":
+        contract = db.get(Contract, str(values.get("contract_id") or ""))
+        if not contract or contract.deleted_at:
+            raise ValueError("contract not found")
+        allowed = {
+            "title",
+            "counterparty",
+            "reference",
+            "start_date",
+            "end_date",
+            "status",
+            "notes",
+        }
+        for key, value in data.items():
+            if key not in allowed:
+                raise ValueError(f"unsupported contract field: {key}")
+            if key in {"start_date", "end_date"}:
+                value = parse_date(str(value)) if value else None
+            if key == "status":
+                value = ContractStatus(str(value))
+            setattr(contract, key, value)
+        if contract.start_date and contract.end_date and contract.end_date < contract.start_date:
+            raise ValueError("contract end date cannot be before its start date")
+        db.add(AuditEvent(entity_type="contract", entity_id=contract.id, action="updated"))
+        db.commit()
+        return {"id": contract.id, "title": contract.title, "action": "updated"}
+    raise ValueError("contract action must be create or edit")
+
+
+def _invoice_payload(data: dict[str, Any], existing: Invoice | None = None) -> InvoiceCreate:
+    def value(name: str, default=None):
+        current = getattr(existing, name, default) if existing else default
+        return data.get(name, current)
+
+    issue_date = value("issue_date")
+    due_date = value("due_date")
+    return InvoiceCreate(
+        reference=str(value("reference", "")),
+        client=str(value("client", "")),
+        contract_id=str(value("contract_id")) if value("contract_id") else None,
+        issue_date=issue_date if isinstance(issue_date, date) else parse_date(str(issue_date or "")),
+        due_date=due_date if isinstance(due_date, date) else parse_date(str(due_date or "")),
+        currency=str(value("currency", "")),
+        subtotal=Decimal(str(value("subtotal", "0"))),
+        tax_amount=Decimal(str(value("tax_amount", "0"))),
+        total=Decimal(str(value("total", "0"))),
+        memo=str(value("memo")) if value("memo") else None,
+    )
+
+
+def _manage_invoice(db: Session, values: dict[str, Any]) -> dict[str, Any]:
+    action = str(values.get("action") or "")
+    data = values.get("values")
+    if not isinstance(data, dict):
+        raise ValueError("invoice values must be an object")
+    if action == "create":
+        payload = _invoice_payload(data)
+        invoice = Invoice(**payload.model_dump())
+        db.add(invoice)
+        db.flush()
+        db.add(AuditEvent(entity_type="invoice", entity_id=invoice.id, action="created"))
+        db.commit()
+        db.refresh(invoice)
+        return {"id": invoice.id, "reference": invoice.reference, "action": "created"}
+    if action == "edit":
+        invoice = db.get(Invoice, str(values.get("invoice_id") or ""))
+        if not invoice or invoice.deleted_at:
+            raise ValueError("invoice not found")
+        payload = _invoice_payload(data, invoice)
+        for key, value in payload.model_dump().items():
+            setattr(invoice, key, value)
+        if "voided" in data:
+            invoice.voided = bool(data["voided"])
+        db.add(AuditEvent(entity_type="invoice", entity_id=invoice.id, action="updated"))
+        db.commit()
+        return {"id": invoice.id, "reference": invoice.reference, "action": "updated"}
+    raise ValueError("invoice action must be create or edit")
+
+
 def execute_tool(db: Session, session: ConversationSession, job: ChatJob, name: str, values: dict[str, Any]) -> dict[str, Any]:
     """Execute one whitelisted tool and return JSON-safe results to the model."""
     if not isinstance(values, dict):
@@ -763,6 +1093,37 @@ def execute_tool(db: Session, session: ConversationSession, job: ChatJob, name: 
         if len(matches) != len(set(str(item) for item in ids)):
             raise ValueError("one or more expense IDs were not found")
         return _request_confirmation(db, session, job, "bulk_edit_expenses", {"expense_ids": [item.id for item in matches], "changes": changes}, f"Update {len(matches)} expenses")
+    if name == "search_income":
+        return {"income": _search_income(db, values)}
+    if name == "create_income":
+        return {"income": _create_income_from_chat(db, session, values)}
+    if name == "list_recurring_occurrences":
+        limit = max(1, min(int(values.get("limit") or 20), 50))
+        return {"occurrences": _pending_occurrences(db, limit)}
+    if name == "complete_recurring_occurrence":
+        return _complete_occurrence_from_chat(db, session, values)
+    if name == "set_attachment_target":
+        return _set_attachment_target(db, session, values)
+    if name == "search_contracts":
+        return {"contracts": _search_contracts(db, values)}
+    if name == "manage_contract":
+        return {"contract": _manage_contract(db, values)}
+    if name == "search_invoices":
+        return {"invoices": _search_invoices(db, values)}
+    if name == "manage_invoice":
+        return {"invoice": _manage_invoice(db, values)}
+    if name == "allocate_invoice_payment":
+        invoice = db.get(Invoice, str(values.get("invoice_id") or ""))
+        income = db.get(IncomeEntry, str(values.get("income_id") or ""))
+        amount = parse_decimal(str(values.get("amount") or ""))
+        if not invoice or not income or amount is None:
+            raise ValueError("valid invoice, income, and amount are required")
+        allocation = allocate_income(db, invoice, income, amount)
+        return {
+            "invoice_id": invoice.id,
+            "income_id": income.id,
+            "allocated": str(allocation.amount),
+        }
     raise ValueError("unsupported tool")
 
 
@@ -812,7 +1173,11 @@ def consume_pending_action(db: Session, token: str, chat_id: str | int, user_id:
 
 
 def _system_prompt(session: ConversationSession) -> str:
-    anchor = f"Active receipt ingestion: {session.active_ingestion_id or 'none'}; active expense: {session.active_expense_id or 'none'}."
+    anchor = (
+        f"Active receipt ingestion: {session.active_ingestion_id or 'none'}; "
+        f"active expense: {session.active_expense_id or 'none'}; "
+        f"active recurring occurrence: {session.active_occurrence_id or 'none'}."
+    )
     return (
         "You are Spendloom, a warm single-user personal finance assistant. "
         "Use tools for any ledger fact, arithmetic, or change; never invent amounts, ids, or records. "

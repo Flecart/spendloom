@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Annotated
 
 from argon2 import PasswordHasher
+import httpx
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, joinedload
@@ -29,33 +30,88 @@ from .models import (
     AppSetting,
     AuditEvent,
     Category,
+    Contract,
+    DocumentLink,
     Expense,
     ExpenseScope,
+    GmailConnection,
+    GmailMessageImport,
+    GmailSenderRule,
+    IncomeEntry,
+    Invoice,
+    InvoiceAllocation,
     Ingestion,
     IngestionStatus,
     MerchantRule,
+    OccurrenceStatus,
     PaymentMethod,
     Receipt,
+    RecurringEntryType,
+    RecurringItem,
+    RecurringOccurrence,
+    SupportingDocument,
 )
 from .schemas import (
     CategoryCreate,
     CategoryOut,
     CategoryUpdate,
+    ContractCreate,
+    ContractOut,
+    ContractUpdate,
     DashboardOut,
     ExpenseOut,
     ExpenseUpdate,
+    FinancialOverviewOut,
+    GmailSenderRuleCreate,
+    GmailSenderRuleOut,
+    GmailSenderRuleUpdate,
+    GmailStatusOut,
+    IncomeCreate,
+    IncomeOut,
+    IncomeUpdate,
     IngestionOut,
+    InvoiceAllocationCreate,
+    InvoiceCreate,
+    InvoiceOut,
+    InvoiceUpdate,
     MerchantRuleOut,
     MerchantRuleCreate,
     MerchantRuleUpdate,
     PaymentMethodCreate,
     PaymentMethodOut,
     PaymentMethodUpdate,
+    OccurrenceComplete,
+    OccurrenceSnooze,
     ReimbursementExportRequest,
+    RecurringItemCreate,
+    RecurringItemOut,
+    RecurringItemUpdate,
+    RecurringOccurrenceOut,
     SettingsOut,
     SettingsUpdate,
+    SupportingDocumentOut,
+)
+from .services.documents import attach_document, document_out
+from .services.finance import (
+    allocate_income,
+    complete_occurrence,
+    contract_out,
+    create_income_entry,
+    financial_overview,
+    income_out,
+    invoice_out,
+    materialize_occurrences,
+    occurrence_out,
+    recurring_item_out,
 )
 from .services.fx import get_eur_rate
+from .services.gmail import (
+    connect_from_code,
+    disconnect_connection,
+    gmail_status,
+    oauth_authorization_url,
+    sync_connection,
+)
 from .services.ingestion import ingest_bytes, schedule_ingestion
 from .services.presentation import expense_out, merchant_rule_out
 from .services.processing import get_setting, normalize_merchant
@@ -151,7 +207,32 @@ async def upload_receipts(
     files: Annotated[list[UploadFile], File()],
     caption: Annotated[str | None, Form()] = None,
     group_files: Annotated[bool, Form()] = False,
+    recurring_occurrence_id: Annotated[str | None, Form()] = None,
 ) -> list[Ingestion]:
+    occurrence = None
+    if recurring_occurrence_id:
+        occurrence = db.scalar(
+            select(RecurringOccurrence)
+            .options(joinedload(RecurringOccurrence.recurring_item))
+            .where(RecurringOccurrence.id == recurring_occurrence_id)
+        )
+        if not occurrence:
+            raise HTTPException(status_code=404, detail="Recurring occurrence not found")
+        if occurrence.status != OccurrenceStatus.pending:
+            raise HTTPException(
+                status_code=422,
+                detail="Only pending recurring occurrences can receive a receipt",
+            )
+        if occurrence.recurring_item.entry_type != RecurringEntryType.expense:
+            raise HTTPException(
+                status_code=422,
+                detail="Receipts can only be linked to recurring expenses",
+            )
+        if len(files) > 1 and not group_files:
+            raise HTTPException(
+                status_code=422,
+                detail="Group multiple files into one receipt before linking an occurrence",
+            )
     if group_files and len(files) > settings.max_receipt_documents:
         raise HTTPException(
             status_code=422,
@@ -201,7 +282,7 @@ async def upload_receipts(
                 group_external_id=group_external_id,
                 ready_at=(
                     datetime.now(timezone.utc) + timedelta(seconds=3)
-                    if group_files
+                    if group_files or occurrence
                     else None
                 ),
             )
@@ -214,6 +295,18 @@ async def upload_receipts(
     if grouped_ingestion:
         schedule_ingestion(db, grouped_ingestion, ready_at=datetime.now(timezone.utc))
         output.append(grouped_ingestion)
+    if occurrence and output:
+        output[0].recurring_occurrence_id = occurrence.id
+        db.add(
+            AuditEvent(
+                entity_type="recurring_occurrence",
+                entity_id=occurrence.id,
+                action="receipt_uploaded",
+                details={"ingestion_id": output[0].id},
+            )
+        )
+        db.commit()
+        db.refresh(output[0])
     return output
 
 
@@ -322,6 +415,14 @@ def update_expense(expense_id: str, payload: ExpenseUpdate, _auth: Auth, db: Db)
         expense.status = IngestionStatus.accepted
         for ingestion in db.scalars(select(Ingestion).where(Ingestion.expense_id == expense.id)):
             ingestion.status = IngestionStatus.accepted
+        occurrence = db.scalar(
+            select(RecurringOccurrence).where(
+                RecurringOccurrence.actual_expense_id == expense.id
+            )
+        )
+        if occurrence:
+            occurrence.status = OccurrenceStatus.completed
+            occurrence.completed_at = datetime.now(timezone.utc)
     if payload.remember_merchant and expense.merchant_normalized:
         rule = db.scalar(select(MerchantRule).where(MerchantRule.merchant_normalized == expense.merchant_normalized))
         desired = (expense.category_id, expense.payment_method_id, expense.scope)
@@ -566,6 +667,11 @@ def _ai_auth_label() -> str:
 @app.get("/api/settings", response_model=SettingsOut)
 def get_app_settings(_auth: Auth, db: Db) -> SettingsOut:
     values = {item.key: item.value for item in db.scalars(select(AppSetting))}
+    gmail_connected = db.scalar(
+        select(GmailConnection.id).where(
+            GmailConnection.status != "disconnected"
+        ).limit(1)
+    ) is not None
     return SettingsOut(
         owner_name=values.get("owner_name", "Owner"),
         owner_email=values.get("owner_email", ""),
@@ -579,6 +685,10 @@ def get_app_settings(_auth: Auth, db: Db) -> SettingsOut:
         ai_configured=_ai_configured(),
         ai_auth_label=_ai_auth_label(),
         base_currency=settings.base_currency,
+        timezone=settings.timezone,
+        reminder_time=values.get("reminder_time", "09:00"),
+        gmail_configured=settings.gmail_configured,
+        gmail_connected=gmail_connected,
     )
 
 
@@ -723,6 +833,7 @@ def _safe_receipt_extension(receipt: Receipt) -> str:
         "image/webp": ({".webp"}, ".webp"),
         "image/heic": ({".heic"}, ".heic"),
         "image/heif": ({".heif", ".heic"}, ".heif"),
+        "text/plain": ({".txt"}, ".txt"),
     }
     allowed, fallback = extensions.get(receipt.mime_type.lower(), (set(), ".bin"))
     return suffix if suffix in allowed else fallback
@@ -919,6 +1030,802 @@ def export_csv(
         writer.writerow(row)
     filename = f"spendloom-expenses-{date.today().isoformat()}.csv"
     return Response(stream.getvalue(), media_type="text/csv", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+@app.get("/api/contracts", response_model=list[ContractOut])
+def list_contracts(_auth: Auth, db: Db) -> list[ContractOut]:
+    items = db.scalars(
+        select(Contract)
+        .where(Contract.deleted_at.is_(None))
+        .order_by(Contract.updated_at.desc())
+    ).all()
+    return [contract_out(db, item) for item in items]
+
+
+@app.post("/api/contracts", response_model=ContractOut, status_code=201)
+def create_contract(payload: ContractCreate, _auth: Auth, db: Db) -> ContractOut:
+    item = Contract(**payload.model_dump())
+    db.add(item)
+    db.flush()
+    db.add(
+        AuditEvent(
+            entity_type="contract",
+            entity_id=item.id,
+            action="created",
+        )
+    )
+    db.commit()
+    db.refresh(item)
+    return contract_out(db, item)
+
+
+@app.patch("/api/contracts/{contract_id}", response_model=ContractOut)
+def update_contract(
+    contract_id: str,
+    payload: ContractUpdate,
+    _auth: Auth,
+    db: Db,
+) -> ContractOut:
+    item = db.get(Contract, contract_id)
+    if not item or item.deleted_at:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    for key, value in payload.model_dump(exclude_unset=True).items():
+        setattr(item, key, value)
+    if item.start_date and item.end_date and item.end_date < item.start_date:
+        raise HTTPException(
+            status_code=422,
+            detail="Contract end date cannot be before its start date",
+        )
+    db.add(
+        AuditEvent(
+            entity_type="contract",
+            entity_id=item.id,
+            action="updated",
+        )
+    )
+    db.commit()
+    db.refresh(item)
+    return contract_out(db, item)
+
+
+@app.delete("/api/contracts/{contract_id}", status_code=204)
+def delete_contract(contract_id: str, _auth: Auth, db: Db) -> Response:
+    item = db.get(Contract, contract_id)
+    if not item or item.deleted_at:
+        raise HTTPException(status_code=404, detail="Contract not found")
+    referenced = db.scalar(
+        select(IncomeEntry.id).where(
+            IncomeEntry.contract_id == item.id,
+            IncomeEntry.deleted_at.is_(None),
+        ).limit(1)
+    ) or db.scalar(
+        select(Invoice.id).where(
+            Invoice.contract_id == item.id,
+            Invoice.deleted_at.is_(None),
+        ).limit(1)
+    ) or db.scalar(
+        select(RecurringItem.id).where(
+            RecurringItem.contract_id == item.id,
+        ).limit(1)
+    )
+    if referenced:
+        raise HTTPException(
+            status_code=409,
+            detail="Archive or end this contract because financial records still reference it",
+        )
+    item.deleted_at = datetime.now(timezone.utc)
+    db.add(AuditEvent(entity_type="contract", entity_id=item.id, action="deleted"))
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.get("/api/income", response_model=list[IncomeOut])
+def list_income(
+    _auth: Auth,
+    db: Db,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    contract_id: str | None = None,
+) -> list[IncomeOut]:
+    query = (
+        select(IncomeEntry)
+        .options(joinedload(IncomeEntry.contract))
+        .where(IncomeEntry.deleted_at.is_(None))
+    )
+    if date_from:
+        query = query.where(IncomeEntry.received_date >= date_from)
+    if date_to:
+        query = query.where(IncomeEntry.received_date <= date_to)
+    if contract_id:
+        query = query.where(IncomeEntry.contract_id == contract_id)
+    items = db.scalars(query.order_by(IncomeEntry.received_date.desc())).unique().all()
+    return [income_out(db, item) for item in items]
+
+
+@app.post("/api/income", response_model=IncomeOut, status_code=201)
+def create_income(payload: IncomeCreate, _auth: Auth, db: Db) -> IncomeOut:
+    try:
+        item = create_income_entry(db, settings, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return income_out(db, item)
+
+
+@app.patch("/api/income/{income_id}", response_model=IncomeOut)
+def update_income(
+    income_id: str,
+    payload: IncomeUpdate,
+    _auth: Auth,
+    db: Db,
+) -> IncomeOut:
+    item = db.get(IncomeEntry, income_id)
+    if not item or item.deleted_at:
+        raise HTTPException(status_code=404, detail="Income entry not found")
+    values = payload.model_dump(exclude_unset=True)
+    if values.get("contract_id"):
+        contract = db.get(Contract, values["contract_id"])
+        if not contract or contract.deleted_at:
+            raise HTTPException(status_code=422, detail="Contract not found")
+    for key, value in values.items():
+        setattr(item, key, value)
+    if {"received_date", "original_amount", "original_currency"} & values.keys():
+        rate, rate_date = get_eur_rate(
+            db,
+            item.original_currency,
+            item.received_date,
+        )
+        item.conversion_rate = rate
+        item.fx_rate_date = rate_date
+        item.fx_estimated = bool(rate_date and rate_date != item.received_date)
+        item.amount = (
+            (item.original_amount * rate).quantize(Decimal("0.01"))
+            if rate is not None
+            else None
+        )
+    db.add(AuditEvent(entity_type="income", entity_id=item.id, action="updated"))
+    db.commit()
+    db.refresh(item)
+    return income_out(db, item)
+
+
+@app.delete("/api/income/{income_id}", status_code=204)
+def delete_income(income_id: str, _auth: Auth, db: Db) -> Response:
+    item = db.get(IncomeEntry, income_id)
+    if not item or item.deleted_at:
+        raise HTTPException(status_code=404, detail="Income entry not found")
+    allocation = db.scalar(
+        select(InvoiceAllocation.id).where(
+            InvoiceAllocation.income_id == item.id
+        ).limit(1)
+    )
+    if allocation:
+        raise HTTPException(
+            status_code=409,
+            detail="Remove this income entry's invoice allocations before deleting it",
+        )
+    item.deleted_at = datetime.now(timezone.utc)
+    db.add(AuditEvent(entity_type="income", entity_id=item.id, action="deleted"))
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.get("/api/invoices", response_model=list[InvoiceOut])
+def list_invoices(_auth: Auth, db: Db) -> list[InvoiceOut]:
+    items = db.scalars(
+        select(Invoice)
+        .options(joinedload(Invoice.contract))
+        .where(Invoice.deleted_at.is_(None))
+        .order_by(Invoice.due_date.desc())
+    ).unique().all()
+    return [invoice_out(db, item) for item in items]
+
+
+@app.post("/api/invoices", response_model=InvoiceOut, status_code=201)
+def create_invoice(payload: InvoiceCreate, _auth: Auth, db: Db) -> InvoiceOut:
+    if payload.contract_id:
+        contract = db.get(Contract, payload.contract_id)
+        if not contract or contract.deleted_at:
+            raise HTTPException(status_code=422, detail="Contract not found")
+    if db.scalar(select(Invoice.id).where(Invoice.reference == payload.reference)):
+        raise HTTPException(status_code=409, detail="Invoice reference already exists")
+    item = Invoice(**payload.model_dump())
+    db.add(item)
+    db.flush()
+    db.add(AuditEvent(entity_type="invoice", entity_id=item.id, action="created"))
+    db.commit()
+    db.refresh(item)
+    return invoice_out(db, item)
+
+
+@app.patch("/api/invoices/{invoice_id}", response_model=InvoiceOut)
+def update_invoice(
+    invoice_id: str,
+    payload: InvoiceUpdate,
+    _auth: Auth,
+    db: Db,
+) -> InvoiceOut:
+    item = db.get(Invoice, invoice_id)
+    if not item or item.deleted_at:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    values = payload.model_dump(exclude_unset=True)
+    proposed = {
+        "reference": values.get("reference", item.reference),
+        "client": values.get("client", item.client),
+        "contract_id": values.get("contract_id", item.contract_id),
+        "issue_date": values.get("issue_date", item.issue_date),
+        "due_date": values.get("due_date", item.due_date),
+        "currency": values.get("currency", item.currency),
+        "subtotal": values.get("subtotal", item.subtotal),
+        "tax_amount": values.get("tax_amount", item.tax_amount),
+        "total": values.get("total", item.total),
+        "memo": values.get("memo", item.memo),
+    }
+    try:
+        validated = InvoiceCreate(**proposed)
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if validated.contract_id:
+        contract = db.get(Contract, validated.contract_id)
+        if not contract or contract.deleted_at:
+            raise HTTPException(status_code=422, detail="Contract not found")
+    duplicate_reference = db.scalar(
+        select(Invoice.id).where(
+            Invoice.reference == validated.reference,
+            Invoice.id != item.id,
+        )
+    )
+    if duplicate_reference:
+        raise HTTPException(status_code=409, detail="Invoice reference already exists")
+    for key, value in values.items():
+        setattr(item, key, value)
+    paid = Decimal(
+        db.scalar(
+            select(func.coalesce(func.sum(InvoiceAllocation.amount), 0)).where(
+                InvoiceAllocation.invoice_id == item.id
+            )
+        )
+        or 0
+    )
+    if paid > item.total:
+        raise HTTPException(
+            status_code=422,
+            detail="Invoice total cannot be lower than its allocated payments",
+        )
+    db.add(AuditEvent(entity_type="invoice", entity_id=item.id, action="updated"))
+    db.commit()
+    db.refresh(item)
+    return invoice_out(db, item)
+
+
+@app.post("/api/invoices/{invoice_id}/allocations", response_model=InvoiceOut)
+def create_invoice_allocation(
+    invoice_id: str,
+    payload: InvoiceAllocationCreate,
+    _auth: Auth,
+    db: Db,
+) -> InvoiceOut:
+    invoice = db.get(Invoice, invoice_id)
+    income = db.get(IncomeEntry, payload.income_id)
+    if not invoice or invoice.deleted_at:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if not income or income.deleted_at:
+        raise HTTPException(status_code=404, detail="Income entry not found")
+    try:
+        allocate_income(db, invoice, income, payload.amount)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.refresh(invoice)
+    return invoice_out(db, invoice)
+
+
+@app.delete("/api/invoices/{invoice_id}/allocations/{income_id}", status_code=204)
+def delete_invoice_allocation(
+    invoice_id: str,
+    income_id: str,
+    _auth: Auth,
+    db: Db,
+) -> Response:
+    allocation = db.scalar(
+        select(InvoiceAllocation).where(
+            InvoiceAllocation.invoice_id == invoice_id,
+            InvoiceAllocation.income_id == income_id,
+        )
+    )
+    if not allocation:
+        raise HTTPException(status_code=404, detail="Invoice allocation not found")
+    db.delete(allocation)
+    db.add(
+        AuditEvent(
+            entity_type="invoice",
+            entity_id=invoice_id,
+            action="payment_unallocated",
+            details={"income_id": income_id},
+        )
+    )
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.delete("/api/invoices/{invoice_id}", status_code=204)
+def delete_invoice(invoice_id: str, _auth: Auth, db: Db) -> Response:
+    item = db.get(Invoice, invoice_id)
+    if not item or item.deleted_at:
+        raise HTTPException(status_code=404, detail="Invoice not found")
+    if db.scalar(
+        select(InvoiceAllocation.id).where(
+            InvoiceAllocation.invoice_id == item.id
+        ).limit(1)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Void an invoice with allocated payments instead of deleting it",
+        )
+    item.deleted_at = datetime.now(timezone.utc)
+    db.add(AuditEvent(entity_type="invoice", entity_id=item.id, action="deleted"))
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.get("/api/recurring-items", response_model=list[RecurringItemOut])
+def list_recurring_items(_auth: Auth, db: Db) -> list[RecurringItemOut]:
+    materialize_occurrences(db)
+    items = db.scalars(select(RecurringItem).order_by(RecurringItem.name)).all()
+    return [recurring_item_out(db, item) for item in items]
+
+
+@app.post("/api/recurring-items", response_model=RecurringItemOut, status_code=201)
+def create_recurring_item(
+    payload: RecurringItemCreate,
+    _auth: Auth,
+    db: Db,
+) -> RecurringItemOut:
+    if payload.category_id and not db.get(Category, payload.category_id):
+        raise HTTPException(status_code=422, detail="Category not found")
+    if payload.payment_method_id and not db.get(PaymentMethod, payload.payment_method_id):
+        raise HTTPException(status_code=422, detail="Payment method not found")
+    if payload.contract_id:
+        contract = db.get(Contract, payload.contract_id)
+        if not contract or contract.deleted_at:
+            raise HTTPException(status_code=422, detail="Contract not found")
+    item = RecurringItem(**payload.model_dump())
+    db.add(item)
+    db.flush()
+    db.add(AuditEvent(entity_type="recurring_item", entity_id=item.id, action="created"))
+    db.commit()
+    materialize_occurrences(db)
+    db.refresh(item)
+    return recurring_item_out(db, item)
+
+
+@app.patch("/api/recurring-items/{item_id}", response_model=RecurringItemOut)
+def update_recurring_item(
+    item_id: str,
+    payload: RecurringItemUpdate,
+    _auth: Auth,
+    db: Db,
+) -> RecurringItemOut:
+    item = db.get(RecurringItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Recurring item not found")
+    values = payload.model_dump(exclude_unset=True)
+    if values.get("category_id") and not db.get(Category, values["category_id"]):
+        raise HTTPException(status_code=422, detail="Category not found")
+    if values.get("payment_method_id") and not db.get(
+        PaymentMethod,
+        values["payment_method_id"],
+    ):
+        raise HTTPException(status_code=422, detail="Payment method not found")
+    if values.get("contract_id"):
+        contract = db.get(Contract, values["contract_id"])
+        if not contract or contract.deleted_at:
+            raise HTTPException(status_code=422, detail="Contract not found")
+    schedule_fields = {
+        "expected_amount",
+        "currency",
+        "frequency",
+        "start_date",
+        "end_date",
+    }
+    if schedule_fields & values.keys():
+        future_occurrences = db.scalars(
+            select(RecurringOccurrence).where(
+                RecurringOccurrence.recurring_item_id == item.id,
+                RecurringOccurrence.status == OccurrenceStatus.pending,
+                RecurringOccurrence.due_date >= date.today(),
+                RecurringOccurrence.actual_expense_id.is_(None),
+                RecurringOccurrence.actual_income_id.is_(None),
+            )
+        ).all()
+        for occurrence in future_occurrences:
+            has_document = db.scalar(
+                select(DocumentLink.id).where(
+                    DocumentLink.recurring_occurrence_id == occurrence.id
+                ).limit(1)
+            )
+            if not has_document:
+                db.delete(occurrence)
+    for key, value in values.items():
+        setattr(item, key, value)
+    if item.end_date and item.end_date < item.start_date:
+        raise HTTPException(
+            status_code=422,
+            detail="Recurring end date cannot be before its start date",
+        )
+    db.add(AuditEvent(entity_type="recurring_item", entity_id=item.id, action="updated"))
+    db.commit()
+    materialize_occurrences(db)
+    db.refresh(item)
+    return recurring_item_out(db, item)
+
+
+@app.get("/api/recurring-occurrences", response_model=list[RecurringOccurrenceOut])
+def list_recurring_occurrences(
+    _auth: Auth,
+    db: Db,
+    include_resolved: bool = False,
+) -> list[RecurringOccurrenceOut]:
+    materialize_occurrences(db)
+    query = (
+        select(RecurringOccurrence)
+        .join(RecurringItem)
+        .options(joinedload(RecurringOccurrence.recurring_item))
+        .where(RecurringItem.active.is_(True))
+    )
+    if not include_resolved:
+        query = query.where(RecurringOccurrence.status == OccurrenceStatus.pending)
+    items = db.scalars(query.order_by(RecurringOccurrence.due_date)).unique().all()
+    return [occurrence_out(item) for item in items]
+
+
+@app.post(
+    "/api/recurring-occurrences/{occurrence_id}/complete",
+    response_model=RecurringOccurrenceOut,
+)
+def record_recurring_occurrence(
+    occurrence_id: str,
+    payload: OccurrenceComplete,
+    _auth: Auth,
+    db: Db,
+) -> RecurringOccurrenceOut:
+    occurrence = db.scalar(
+        select(RecurringOccurrence)
+        .options(joinedload(RecurringOccurrence.recurring_item))
+        .where(RecurringOccurrence.id == occurrence_id)
+    )
+    if not occurrence:
+        raise HTTPException(status_code=404, detail="Recurring occurrence not found")
+    try:
+        complete_occurrence(
+            db,
+            settings,
+            occurrence,
+            amount=payload.amount,
+            occurred_on=payload.occurred_on,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.refresh(occurrence)
+    return occurrence_out(occurrence)
+
+
+@app.post(
+    "/api/recurring-occurrences/{occurrence_id}/skip",
+    response_model=RecurringOccurrenceOut,
+)
+def skip_recurring_occurrence(
+    occurrence_id: str,
+    _auth: Auth,
+    db: Db,
+) -> RecurringOccurrenceOut:
+    occurrence = db.scalar(
+        select(RecurringOccurrence)
+        .options(joinedload(RecurringOccurrence.recurring_item))
+        .where(RecurringOccurrence.id == occurrence_id)
+    )
+    if not occurrence:
+        raise HTTPException(status_code=404, detail="Recurring occurrence not found")
+    if occurrence.status != OccurrenceStatus.pending:
+        raise HTTPException(status_code=409, detail="Occurrence is already resolved")
+    occurrence.status = OccurrenceStatus.skipped
+    occurrence.completed_at = datetime.now(timezone.utc)
+    db.add(
+        AuditEvent(
+            entity_type="recurring_occurrence",
+            entity_id=occurrence.id,
+            action="skipped",
+        )
+    )
+    db.commit()
+    db.refresh(occurrence)
+    return occurrence_out(occurrence)
+
+
+@app.post(
+    "/api/recurring-occurrences/{occurrence_id}/snooze",
+    response_model=RecurringOccurrenceOut,
+)
+def snooze_recurring_occurrence(
+    occurrence_id: str,
+    payload: OccurrenceSnooze,
+    _auth: Auth,
+    db: Db,
+) -> RecurringOccurrenceOut:
+    occurrence = db.scalar(
+        select(RecurringOccurrence)
+        .options(joinedload(RecurringOccurrence.recurring_item))
+        .where(RecurringOccurrence.id == occurrence_id)
+    )
+    if not occurrence:
+        raise HTTPException(status_code=404, detail="Recurring occurrence not found")
+    if occurrence.status != OccurrenceStatus.pending:
+        raise HTTPException(status_code=409, detail="Occurrence is already resolved")
+    occurrence.snoozed_until = date.today() + timedelta(days=payload.days)
+    db.commit()
+    db.refresh(occurrence)
+    return occurrence_out(occurrence)
+
+
+@app.get("/api/financial-overview", response_model=FinancialOverviewOut)
+def get_financial_overview(
+    _auth: Auth,
+    db: Db,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> FinancialOverviewOut:
+    end = date_to or date.today()
+    start = date_from or date(end.year, 1, 1)
+    if start > end:
+        raise HTTPException(status_code=422, detail="date_from must not follow date_to")
+    materialize_occurrences(db, today=end)
+    return financial_overview(db, date_from=start, date_to=end)
+
+
+@app.post("/api/documents", response_model=SupportingDocumentOut, status_code=201)
+async def upload_supporting_document(
+    _auth: Auth,
+    db: Db,
+    file: UploadFile = File(...),
+    target_type: str = Form(...),
+    target_id: str = Form(...),
+) -> SupportingDocumentOut:
+    data = await file.read(settings.max_upload_mb * 1024 * 1024 + 1)
+    try:
+        document = attach_document(
+            db,
+            settings,
+            data=data,
+            filename=file.filename or "document",
+            claimed_mime=file.content_type,
+            target_type=target_type,
+            target_id=target_id,
+        )
+    except (InvalidReceiptFile, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return document_out(document)
+
+
+@app.get("/api/documents/{document_id}/file")
+def supporting_document_file(
+    document_id: str,
+    _auth: Auth,
+    db: Db,
+) -> FileResponse:
+    document = db.get(SupportingDocument, document_id)
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found")
+    document_path = Path(document.storage_path).resolve()
+    documents_root = settings.documents_dir.resolve()
+    if (
+        not document_path.is_relative_to(documents_root)
+        or not document_path.is_file()
+    ):
+        raise HTTPException(status_code=404, detail="Document not found")
+    return FileResponse(
+        document_path,
+        media_type=document.mime_type,
+        filename=document.original_filename,
+    )
+
+
+@app.delete("/api/documents/{document_id}/links/{target_type}/{target_id}", status_code=204)
+def unlink_supporting_document(
+    document_id: str,
+    target_type: str,
+    target_id: str,
+    _auth: Auth,
+    db: Db,
+) -> Response:
+    column_names = {
+        "expense": "expense_id",
+        "income": "income_id",
+        "contract": "contract_id",
+        "invoice": "invoice_id",
+        "occurrence": "recurring_occurrence_id",
+    }
+    column_name = column_names.get(target_type)
+    if not column_name:
+        raise HTTPException(status_code=422, detail="Unsupported document target")
+    link = db.scalar(
+        select(DocumentLink).where(
+            DocumentLink.document_id == document_id,
+            getattr(DocumentLink, column_name) == target_id,
+        )
+    )
+    if not link:
+        raise HTTPException(status_code=404, detail="Document link not found")
+    db.delete(link)
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.get("/api/integrations/gmail", response_model=GmailStatusOut)
+def get_gmail_status(_auth: Auth, db: Db) -> GmailStatusOut:
+    return gmail_status(db, settings)
+
+
+@app.get("/api/integrations/gmail/oauth/start")
+def start_gmail_oauth(request: Request, _auth: Auth) -> RedirectResponse:
+    state = secrets.token_urlsafe(32)
+    request.session["gmail_oauth_state"] = state
+    redirect_uri = f"{settings.app_origin.rstrip('/')}/api/integrations/gmail/oauth/callback"
+    try:
+        destination = oauth_authorization_url(settings, state, redirect_uri)
+    except ValueError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return RedirectResponse(destination, status_code=302)
+
+
+@app.get("/api/integrations/gmail/oauth/callback")
+def finish_gmail_oauth(
+    request: Request,
+    db: Db,
+    state: str,
+    code: str | None = None,
+    error: str | None = None,
+) -> RedirectResponse:
+    expected = request.session.pop("gmail_oauth_state", None)
+    if not expected or not secrets.compare_digest(expected, state):
+        raise HTTPException(status_code=400, detail="Invalid or expired Gmail OAuth state")
+    if not request.session.get("authenticated"):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    if error or not code:
+        raise HTTPException(status_code=400, detail=f"Gmail authorization failed: {error or 'missing code'}")
+    redirect_uri = f"{settings.app_origin.rstrip('/')}/api/integrations/gmail/oauth/callback"
+    try:
+        connect_from_code(
+            db,
+            settings,
+            code=code,
+            redirect_uri=redirect_uri,
+        )
+    except (ValueError, httpx.HTTPError) as exc:
+        raise HTTPException(status_code=400, detail=f"Gmail authorization failed: {exc}") from exc
+    return RedirectResponse("/?gmail=connected", status_code=302)
+
+
+@app.post("/api/integrations/gmail/sync")
+def sync_gmail_now(_auth: Auth, db: Db) -> dict:
+    connection = db.scalar(
+        select(GmailConnection).where(GmailConnection.status != "disconnected").limit(1)
+    )
+    if not connection:
+        raise HTTPException(status_code=404, detail="Gmail is not connected")
+    try:
+        count = sync_connection(db, settings, connection)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Gmail sync failed: {exc}") from exc
+    return {"imported": count}
+
+
+@app.post("/api/integrations/gmail/disconnect", status_code=204)
+def disconnect_gmail(_auth: Auth, db: Db) -> Response:
+    connection = db.scalar(
+        select(GmailConnection).where(GmailConnection.status != "disconnected").limit(1)
+    )
+    if not connection:
+        raise HTTPException(status_code=404, detail="Gmail is not connected")
+    disconnect_connection(db, settings, connection)
+    return Response(status_code=204)
+
+
+def _validate_gmail_recurring_item(
+    db: Session,
+    recurring_item_id: str | None,
+) -> None:
+    if not recurring_item_id:
+        return
+    recurring_item = db.get(RecurringItem, recurring_item_id)
+    if not recurring_item or not recurring_item.active:
+        raise HTTPException(status_code=422, detail="Active recurring item not found")
+    if recurring_item.entry_type != RecurringEntryType.expense:
+        raise HTTPException(
+            status_code=422,
+            detail="Gmail receipt rules can only map to recurring expenses",
+        )
+
+
+@app.post(
+    "/api/integrations/gmail/sender-rules",
+    response_model=GmailSenderRuleOut,
+    status_code=201,
+)
+def create_gmail_sender_rule(
+    payload: GmailSenderRuleCreate,
+    _auth: Auth,
+    db: Db,
+) -> GmailSenderRuleOut:
+    connection = db.scalar(
+        select(GmailConnection).where(GmailConnection.status != "disconnected").limit(1)
+    )
+    if not connection:
+        raise HTTPException(status_code=404, detail="Gmail is not connected")
+    if db.scalar(
+        select(GmailSenderRule.id).where(
+            GmailSenderRule.connection_id == connection.id,
+            GmailSenderRule.sender_address == payload.sender_address,
+        )
+    ):
+        raise HTTPException(status_code=409, detail="That Gmail sender is already configured")
+    _validate_gmail_recurring_item(db, payload.recurring_item_id)
+    if payload.category_id and not db.get(Category, payload.category_id):
+        raise HTTPException(status_code=422, detail="Category not found")
+    rule = GmailSenderRule(
+        connection_id=connection.id,
+        **payload.model_dump(),
+    )
+    db.add(rule)
+    db.commit()
+    db.refresh(rule)
+    return next(
+        item
+        for item in gmail_status(db, settings).sender_rules
+        if item.id == rule.id
+    )
+
+
+@app.patch(
+    "/api/integrations/gmail/sender-rules/{rule_id}",
+    response_model=GmailSenderRuleOut,
+)
+def update_gmail_sender_rule(
+    rule_id: str,
+    payload: GmailSenderRuleUpdate,
+    _auth: Auth,
+    db: Db,
+) -> GmailSenderRuleOut:
+    rule = db.get(GmailSenderRule, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Gmail sender rule not found")
+    values = payload.model_dump(exclude_unset=True)
+    _validate_gmail_recurring_item(db, values.get("recurring_item_id"))
+    if values.get("category_id") and not db.get(Category, values["category_id"]):
+        raise HTTPException(status_code=422, detail="Category not found")
+    for key, value in values.items():
+        setattr(rule, key, value)
+    db.commit()
+    return next(
+        item
+        for item in gmail_status(db, settings).sender_rules
+        if item.id == rule.id
+    )
+
+
+@app.delete("/api/integrations/gmail/sender-rules/{rule_id}", status_code=204)
+def delete_gmail_sender_rule(rule_id: str, _auth: Auth, db: Db) -> Response:
+    rule = db.get(GmailSenderRule, rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Gmail sender rule not found")
+    imported = db.scalar(
+        select(GmailMessageImport.id).where(
+            GmailMessageImport.sender_rule_id == rule.id
+        ).limit(1)
+    )
+    if imported:
+        rule.enabled = False
+    else:
+        db.delete(rule)
+    db.commit()
+    return Response(status_code=204)
 
 
 frontend_dist = Path(__file__).resolve().parent.parent / "frontend" / "dist"
