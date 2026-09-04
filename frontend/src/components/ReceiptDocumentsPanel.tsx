@@ -41,6 +41,13 @@ export default function ReceiptDocumentsPanel({
           src={previewUrl}
           alt={`Receipt document ${selectedIndex + 1}`}
         />
+      ) : selected.mime_type === "text/plain" ? (
+        <iframe
+          className="receipt-preview"
+          src={selected.file_url}
+          title={`Email receipt text ${selectedIndex + 1}`}
+          sandbox=""
+        />
       ) : (
         <Box className="empty-state">Preview unavailable</Box>
       )}

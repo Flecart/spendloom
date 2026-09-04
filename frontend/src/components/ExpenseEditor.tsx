@@ -6,6 +6,7 @@ import {
 import { CheckRounded, DeleteOutlineRounded, ReplayRounded } from "@mui/icons-material";
 import { api, Category, Expense, PaymentMethod, money } from "../api";
 import ReceiptDocumentsPanel from "./ReceiptDocumentsPanel";
+import DocumentUpload from "./DocumentUpload";
 
 export default function ExpenseEditor({expense, open, onClose, onChanged}: {
   expense: Expense | null; open: boolean; onClose: () => void; onChanged: () => void;
@@ -48,6 +49,22 @@ export default function ExpenseEditor({expense, open, onClose, onChanged}: {
         <Box sx={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:2}}><TextField select label="Payment method" value={draft.payment_method_id || ""} onChange={(e)=>set("payment_method_id",e.target.value || null)}><MenuItem value="">None</MenuItem>{methods.map(m=><MenuItem key={m.id} value={m.id}>{m.name}</MenuItem>)}</TextField><TextField select label="Scope" value={draft.scope} onChange={(e)=>set("scope",e.target.value)}>{["personal","business","unknown"].map(s=><MenuItem key={s} value={s}>{s}</MenuItem>)}</TextField></Box>
         <Box sx={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:2}}>{field("location","Location")}{field("department","Department")}{field("trip_name","Trip name")}<FormControlLabel control={<Checkbox checked={draft.refundable} onChange={(e)=>set("refundable",e.target.checked)} />} label="Refundable" /></Box>
         <TextField multiline minRows={2} label="Memo" value={draft.memo || ""} onChange={(e)=>set("memo",e.target.value || null)} />
+        <Box>
+          <DocumentUpload
+            targetType="expense"
+            targetId={draft.id}
+            onUploaded={(document) => setDraft({
+              ...draft,
+              supporting_documents: [...(draft.supporting_documents || []), document],
+            })}
+            onError={setError}
+          />
+          {(draft.supporting_documents || []).map((document) => (
+            <Button key={document.id} size="small" href={document.file_url}>
+              {document.filename}
+            </Button>
+          ))}
+        </Box>
         <Divider><Typography variant="caption">QUICKBOOKS MAPPINGS</Typography></Divider>
         <Box sx={{display:"grid", gridTemplateColumns:"1fr 1fr", gap:2}}>{field("quickbooks_category","Category")}{field("quickbooks_class","Class")}{field("quickbooks_customer_job","Customer / Job")}{field("quickbooks_location","Location")}{field("quickbooks_subprogram","Subprogram")}{field("quickbooks_vendor","Vendor")}</Box>
         <FormControlLabel control={<Checkbox checked={remember} onChange={(e)=>setRemember(e.target.checked)} />} label="Remember for this merchant" />

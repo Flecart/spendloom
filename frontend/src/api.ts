@@ -50,6 +50,7 @@ export interface Expense {
   ingestion_id: string | null;
   document_count: number;
   documents: ReceiptDocument[];
+  supporting_documents: SupportingDocument[];
   created_at: string;
   updated_at: string;
 }
@@ -71,8 +72,153 @@ export interface AppSettings {
   ai_configured: boolean;
   ai_auth_label: string;
   base_currency: string;
+  timezone: string;
+  reminder_time: string;
+  gmail_configured: boolean;
+  gmail_connected: boolean;
 }
 export interface Ingestion { id: string; expense_id: string | null; source: string; external_id: string; status: ExpenseStatus; attempts: number; error_code: string | null; error_message: string | null; received_at: string; processed_at: string | null; document_count: number; merged_into_ingestion_id: string | null; }
+
+export interface SupportingDocument {
+  id: string;
+  filename: string;
+  mime_type: string;
+  size_bytes: number;
+  file_url: string;
+}
+
+export type IncomeKind = "salary" | "contract" | "rental" | "interest" | "refund" | "other";
+
+export interface Income {
+  id: string;
+  received_date: string;
+  payer: string;
+  kind: IncomeKind;
+  original_amount: string;
+  original_currency: string;
+  amount: string | null;
+  currency: string;
+  conversion_rate: string | null;
+  fx_estimated: boolean;
+  fx_rate_date: string | null;
+  contract_id: string | null;
+  contract_title: string | null;
+  memo: string | null;
+  allocated_amount: string;
+  document_count: number;
+  documents: SupportingDocument[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Contract {
+  id: string;
+  title: string;
+  counterparty: string;
+  reference: string | null;
+  start_date: string | null;
+  end_date: string | null;
+  status: "draft" | "active" | "ended" | "cancelled";
+  notes: string | null;
+  document_count: number;
+  documents: SupportingDocument[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Invoice {
+  id: string;
+  reference: string;
+  client: string;
+  contract_id: string | null;
+  contract_title: string | null;
+  issue_date: string;
+  due_date: string;
+  currency: string;
+  subtotal: string;
+  tax_amount: string;
+  total: string;
+  paid_amount: string;
+  outstanding_amount: string;
+  status: "unpaid" | "partial" | "paid" | "overdue" | "void";
+  memo: string | null;
+  document_count: number;
+  documents: SupportingDocument[];
+  created_at: string;
+  updated_at: string;
+}
+
+export type RecurringEntryType = "expense" | "income";
+export type RecurrenceFrequency = "weekly" | "monthly" | "quarterly" | "yearly";
+
+export interface RecurringItem {
+  id: string;
+  name: string;
+  entry_type: RecurringEntryType;
+  counterparty: string;
+  expected_amount: string | null;
+  currency: string;
+  frequency: RecurrenceFrequency;
+  start_date: string;
+  end_date: string | null;
+  reminder_days_before: number;
+  category_id: string | null;
+  payment_method_id: string | null;
+  scope: Scope;
+  income_kind: IncomeKind | null;
+  contract_id: string | null;
+  active: boolean;
+  next_due_date: string | null;
+}
+
+export interface RecurringOccurrence {
+  id: string;
+  recurring_item_id: string;
+  recurring_item_name: string;
+  entry_type: RecurringEntryType;
+  counterparty: string;
+  due_date: string;
+  expected_amount: string | null;
+  currency: string;
+  status: "pending" | "completed" | "skipped";
+  timing: "upcoming" | "due" | "overdue" | "completed" | "skipped";
+  actual_expense_id: string | null;
+  actual_income_id: string | null;
+  snoozed_until: string | null;
+}
+
+export interface FinancialOverview {
+  date_from: string;
+  date_to: string;
+  expense_total: string;
+  income_total: string;
+  net_cash_flow: string;
+  outstanding_receivables: string;
+  due_count: number;
+  overdue_count: number;
+  by_month: { month: string; income: number; expense: number }[];
+}
+
+export interface GmailSenderRule {
+  id: string;
+  sender_address: string;
+  recurring_item_id: string | null;
+  recurring_item_name: string | null;
+  category_id: string | null;
+  scope: Scope | null;
+  match_window_days: number;
+  enabled: boolean;
+}
+
+export interface GmailStatus {
+  configured: boolean;
+  connected: boolean;
+  email_address: string | null;
+  status: string;
+  last_synced_at: string | null;
+  error_message: string | null;
+  sender_rules: GmailSenderRule[];
+}
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers);

@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AppBar, Avatar, Badge, Box, Button, CssBaseline, Drawer, IconButton, List, ListItemButton, ListItemIcon,
-  ListItemText, ThemeProvider, Toolbar, Tooltip, Typography, createTheme, useMediaQuery,
+  ListItemText, Menu, MenuItem, ThemeProvider, Toolbar, Typography, createTheme, useMediaQuery,
 } from "@mui/material";
 import {
-  AddRounded, CategoryRounded, DashboardRounded, DarkModeRounded, LightModeRounded, LogoutRounded,
-  MenuRounded, ReceiptLongRounded, ReviewsRounded, SettingsRounded, WalletRounded,
+  AddRounded, AccountBalanceRounded, DashboardRounded, DarkModeRounded, DescriptionRounded,
+  EventRepeatRounded, LightModeRounded, LogoutRounded, MenuRounded, ReceiptLongRounded,
+  ReviewsRounded, SettingsRounded, TrendingUpRounded,
 } from "@mui/icons-material";
 import { api } from "./api";
 import Login from "./components/Login";
@@ -13,8 +14,11 @@ import DashboardPage from "./pages/DashboardPage";
 import ExpensesPage from "./pages/ExpensesPage";
 import SettingsPage from "./pages/SettingsPage";
 import UploadDialog from "./components/UploadDialog";
+import ContractsPage from "./pages/ContractsPage";
+import IncomePage from "./pages/IncomePage";
+import RecurringPage from "./pages/RecurringPage";
 
-type Page = "dashboard" | "expenses" | "review" | "settings";
+type Page = "dashboard" | "expenses" | "income" | "recurring" | "contracts" | "review" | "settings";
 
 export default function App() {
   const deepExpenseId = window.location.pathname.match(/^\/expenses\/([^/]+)$/)?.[1];
@@ -25,6 +29,7 @@ export default function App() {
   const [uploadOpen, setUploadOpen] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [reviewCount, setReviewCount] = useState(0);
+  const [addAnchor, setAddAnchor] = useState<HTMLElement | null>(null);
   const mobile = useMediaQuery("(max-width:900px)");
 
   useEffect(() => { api<{authenticated: boolean}>("/api/auth/me").then((r) => setAuthenticated(r.authenticated)).catch(() => setAuthenticated(false)); }, []);
@@ -54,6 +59,9 @@ export default function App() {
   const nav = [
     { id: "dashboard" as Page, label: "Overview", icon: <DashboardRounded /> },
     { id: "expenses" as Page, label: "Expenses", icon: <ReceiptLongRounded /> },
+    { id: "income" as Page, label: "Income", icon: <TrendingUpRounded /> },
+    { id: "recurring" as Page, label: "Recurring", icon: <EventRepeatRounded /> },
+    { id: "contracts" as Page, label: "Contracts", icon: <DescriptionRounded /> },
     { id: "review" as Page, label: "Review inbox", icon: <Badge color="error" badgeContent={reviewCount}><ReviewsRounded /></Badge> },
     { id: "settings" as Page, label: "Settings", icon: <SettingsRounded /> },
   ];
@@ -71,12 +79,15 @@ export default function App() {
 
   return <ThemeProvider theme={theme}><CssBaseline /><Box className="app-shell">
     <AppBar position="fixed" color="inherit" elevation={0} sx={{borderBottom:1, borderColor:"divider", ml: mobile ? 0 : "264px", width: mobile ? "100%" : "calc(100% - 264px)"}}>
-      <Toolbar sx={{gap:1}}>{mobile && <IconButton onClick={() => setMobileOpen(true)}><MenuRounded /></IconButton>}<Typography fontWeight={750} sx={{flexGrow:1}}>{nav.find((item) => item.id === page)?.label}</Typography><Tooltip title="Upload receipt"><Button variant="contained" startIcon={<AddRounded />} onClick={() => setUploadOpen(true)}>Add receipt</Button></Tooltip></Toolbar>
+      <Toolbar sx={{gap:1}}>{mobile && <IconButton onClick={() => setMobileOpen(true)}><MenuRounded /></IconButton>}<Typography fontWeight={750} sx={{flexGrow:1}}>{nav.find((item) => item.id === page)?.label}</Typography><Button variant="contained" startIcon={<AddRounded />} onClick={(event) => setAddAnchor(event.currentTarget)}>Add</Button><Menu anchorEl={addAnchor} open={Boolean(addAnchor)} onClose={() => setAddAnchor(null)}><MenuItem onClick={() => {setAddAnchor(null);setUploadOpen(true);}}><ReceiptLongRounded sx={{mr:1}}/>Receipt</MenuItem><MenuItem onClick={() => {setAddAnchor(null);setPage("income");}}><TrendingUpRounded sx={{mr:1}}/>Income</MenuItem><MenuItem onClick={() => {setAddAnchor(null);setPage("recurring");}}><EventRepeatRounded sx={{mr:1}}/>Recurring item</MenuItem><MenuItem onClick={() => {setAddAnchor(null);setPage("contracts");}}><AccountBalanceRounded sx={{mr:1}}/>Contract or invoice</MenuItem></Menu></Toolbar>
     </AppBar>
     <Box component="nav"><Drawer variant={mobile ? "temporary" : "permanent"} open={mobile ? mobileOpen : true} onClose={() => setMobileOpen(false)} ModalProps={{keepMounted:true}} sx={{"& .MuiDrawer-paper":{width:264, borderRight:1, borderColor:"divider"}}}>{drawer}</Drawer></Box>
     <Box component="main" sx={{ml: mobile ? 0 : "264px", pt:"64px"}}><Box className="main-content">
       {page === "dashboard" && <DashboardPage key={refreshKey} onReview={() => setPage("review")} />}
       {page === "expenses" && <ExpensesPage key={`expenses-${refreshKey}`} initialExpenseId={deepExpenseId} />}
+      {page === "income" && <IncomePage key={`income-${refreshKey}`} />}
+      {page === "recurring" && <RecurringPage key={`recurring-${refreshKey}`} />}
+      {page === "contracts" && <ContractsPage key={`contracts-${refreshKey}`} />}
       {page === "review" && <ExpensesPage key={`review-${refreshKey}`} reviewOnly onChanged={() => setRefreshKey((k) => k + 1)} />}
       {page === "settings" && <SettingsPage />}
     </Box></Box>

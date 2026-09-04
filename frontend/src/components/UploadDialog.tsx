@@ -1,6 +1,7 @@
 import {
   ChangeEvent,
   DragEvent,
+  useEffect,
   useRef,
   useState,
 } from "react";
@@ -13,8 +14,12 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  FormControl,
   FormControlLabel,
+  InputLabel,
   LinearProgress,
+  MenuItem,
+  Select,
   TextField,
   Typography,
 } from "@mui/material";
@@ -23,7 +28,10 @@ import {
   InsertDriveFileRounded,
 } from "@mui/icons-material";
 
-import { api } from "../api";
+import {
+  api,
+  RecurringOccurrence,
+} from "../api";
 
 interface UploadDialogProps {
   open: boolean;
@@ -43,11 +51,28 @@ export default function UploadDialog({
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [occurrences, setOccurrences] = useState<RecurringOccurrence[]>([]);
+  const [occurrenceId, setOccurrenceId] = useState("");
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    api<RecurringOccurrence[]>("/api/recurring-occurrences")
+      .then((items) => {
+        setOccurrences(items.filter((item) => item.entry_type === "expense"));
+      })
+      .catch(() => {
+        setOccurrences([]);
+      });
+  }, [open]);
 
   const selectFiles = (list: FileList | null) => {
     const selected = list ? Array.from(list) : [];
     setFiles(selected);
-    if (selected.length < 2) {
+    if (occurrenceId && selected.length > 1) {
+      setGroupFiles(true);
+    } else if (selected.length < 2) {
       setGroupFiles(false);
     }
   };
@@ -67,6 +92,9 @@ export default function UploadDialog({
     if (caption) {
       body.append("caption", caption);
     }
+    if (occurrenceId) {
+      body.append("recurring_occurrence_id", occurrenceId);
+    }
     try {
       await api("/api/ingestions", {
         method: "POST",
@@ -75,6 +103,7 @@ export default function UploadDialog({
       setFiles([]);
       setCaption("");
       setGroupFiles(false);
+      setOccurrenceId("");
       onUploaded();
     } catch (uploadError) {
       setError(
@@ -156,10 +185,15 @@ export default function UploadDialog({
             control={(
               <Checkbox
                 checked={groupFiles}
+                disabled={Boolean(occurrenceId)}
                 onChange={(event) => setGroupFiles(event.target.checked)}
               />
             )}
-            label="These files belong to one receipt"
+            label={
+              occurrenceId
+                ? "Files are grouped for the selected recurring expense"
+                : "These files belong to one receipt"
+            }
           />
         )}
         <TextField
@@ -170,6 +204,32 @@ export default function UploadDialog({
           onChange={(event) => setCaption(event.target.value)}
           helperText="This helps classification and is stored with the receipt."
         />
+        <FormControl fullWidth>
+          <InputLabel id="recurring-occurrence-label">
+            Recurring expense (optional)
+          </InputLabel>
+          <Select
+            labelId="recurring-occurrence-label"
+            label="Recurring expense (optional)"
+            value={occurrenceId}
+            onChange={(event) => {
+              setOccurrenceId(event.target.value);
+              if (event.target.value && files.length > 1) {
+                setGroupFiles(true);
+              }
+            }}
+          >
+            <MenuItem value="">None</MenuItem>
+            {occurrences.map((occurrence) => (
+              <MenuItem key={occurrence.id} value={occurrence.id}>
+                {occurrence.recurring_item_name} · {occurrence.due_date}
+                {occurrence.expected_amount
+                  ? ` · ${occurrence.expected_amount} ${occurrence.currency}`
+                  : ""}
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
       </DialogContent>
       <DialogActions sx={{ p: 2.5 }}>
         <Button onClick={onClose} disabled={loading}>Cancel</Button>

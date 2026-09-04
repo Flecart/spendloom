@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Alert, Box, Button, ButtonGroup, Card, CardContent, Chip, CircularProgress, Grid, MenuItem, Stack, TextField, Typography } from "@mui/material";
 import { ArrowForwardRounded, ErrorOutlineRounded, ReceiptLongRounded, ReviewsRounded, TrendingDownRounded, TrendingUpRounded } from "@mui/icons-material";
 import { Area, AreaChart, CartesianGrid, Cell, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import { api, Dashboard, Scope, money } from "../api";
+import { api, Dashboard, FinancialOverview, Scope, money } from "../api";
 
 type RangePreset = "month" | "3m" | "6m" | "12m" | "ytd" | "all" | "custom";
 type RangeState = { preset: RangePreset; date_from: string; date_to: string; scope: "" | Scope };
@@ -24,15 +24,22 @@ function presetRange(preset: RangePreset, current: RangeState): RangeState {
 export default function DashboardPage({onReview}:{onReview:()=>void}) {
   const [range,setRange]=useState<RangeState>(()=>{ try { return {...defaultRange(), ...JSON.parse(localStorage.getItem(key) || "{}")} } catch { return defaultRange(); } });
   const [data,setData]=useState<Dashboard|null>(null); const [error,setError]=useState("");
+  const [finance,setFinance]=useState<FinancialOverview|null>(null);
   const query=useMemo(()=>{const params=new URLSearchParams({date_from:range.date_from,date_to:range.date_to});if(range.scope)params.set("scope",range.scope);return params.toString()},[range]);
-  useEffect(()=>{localStorage.setItem(key,JSON.stringify(range));api<Dashboard>(`/api/dashboard?${query}`).then(setData).catch(e=>setError(e.message))},[query,range]);
+  useEffect(()=>{localStorage.setItem(key,JSON.stringify(range));Promise.all([api<Dashboard>(`/api/dashboard?${query}`),api<FinancialOverview>(`/api/financial-overview?date_from=${range.date_from}&date_to=${range.date_to}`)]).then(([dashboard,financial])=>{setData(dashboard);setFinance(financial)}).catch(e=>setError(e.message))},[query,range]);
   const setPreset=(preset:RangePreset)=>setRange(current=>presetRange(preset,current));
-  if(error) return <Alert severity="error">{error}</Alert>; if(!data) return <Box sx={{display:"grid",placeItems:"center",height:300}}><CircularProgress/></Box>;
+  if(error) return <Alert severity="error">{error}</Alert>; if(!data||!finance) return <Box sx={{display:"grid",placeItems:"center",height:300}}><CircularProgress/></Box>;
   const previous=Number(data.previous_range_total); const current=Number(data.range_total); const direction=current>=previous;
   const title=`${new Date(`${data.date_from}T12:00:00`).toLocaleDateString(undefined,{day:"numeric",month:"short",year:"numeric"})} – ${new Date(`${data.date_to}T12:00:00`).toLocaleDateString(undefined,{day:"numeric",month:"short",year:"numeric"})}`;
   return <Stack spacing={3}>
     <Box><Typography className="eyebrow">Overview</Typography><Typography variant="h4" className="page-title">Your spending, in context</Typography><Typography color="text.secondary">Accepted expenses in <b>{title}</b>{range.scope?` · ${range.scope}`:""}.</Typography></Box>
     <Card><CardContent><Stack spacing={1.5}><ButtonGroup size="small" variant="outlined" sx={{flexWrap:"wrap",justifyContent:"flex-start"}}>{([ ["month","This month"],["3m","3 months"],["6m","6 months"],["12m","12 months"],["ytd","Year to date"],["all","All time"] ] as [RangePreset,string][]).map(([preset,label])=><Button key={preset} variant={range.preset===preset?"contained":"outlined"} onClick={()=>setPreset(preset)}>{label}</Button>)}<Button variant={range.preset==="custom"?"contained":"outlined"} onClick={()=>setPreset("custom")}>Custom</Button></ButtonGroup><Box sx={{display:"flex",gap:1,flexWrap:"wrap",alignItems:"center"}}><TextField size="small" label="From" type="date" value={range.date_from} slotProps={{inputLabel:{shrink:true}}} onChange={e=>setRange({...range,preset:"custom",date_from:e.target.value})}/><TextField size="small" label="To" type="date" value={range.date_to} slotProps={{inputLabel:{shrink:true}}} onChange={e=>setRange({...range,preset:"custom",date_to:e.target.value})}/><TextField size="small" select label="Scope" value={range.scope} onChange={e=>setRange({...range,scope:e.target.value as ""|Scope})} sx={{minWidth:140}}><MenuItem value="">All scopes</MenuItem><MenuItem value="personal">Personal</MenuItem><MenuItem value="business">Business</MenuItem><MenuItem value="unknown">Unknown</MenuItem></TextField></Box></Stack></CardContent></Card>
+    <Grid container spacing={2}>{[
+      ["Income",money(finance.income_total),<TrendingUpRounded/>],
+      ["Net cash flow",money(finance.net_cash_flow),Number(finance.net_cash_flow)>=0?<TrendingUpRounded/>:<TrendingDownRounded/>],
+      ["Outstanding invoices",money(finance.outstanding_receivables),<ReceiptLongRounded/>],
+      ["Due / overdue",`${finance.due_count} / ${finance.overdue_count}`,<ReviewsRounded/>],
+    ].map(([label,value,icon])=><Grid key={String(label)} size={{xs:12,sm:6,lg:3}}><Card className="metric-card"><CardContent><Box sx={{color:"primary.main",mb:2}}>{icon}</Box><Typography variant="h5">{value}</Typography><Typography color="text.secondary">{label}</Typography></CardContent></Card></Grid>)}</Grid>
     {data.review_count>0&&<Alert severity="info" action={<Button onClick={onReview} endIcon={<ArrowForwardRounded/>}>Review now</Button>}>{data.review_count} receipt{data.review_count===1?"":"s"} need your attention in this range.</Alert>}
     <Grid container spacing={2}>{[
       ["Spent in selected range",money(data.range_total),direction?<TrendingUpRounded/>:<TrendingDownRounded/>],
