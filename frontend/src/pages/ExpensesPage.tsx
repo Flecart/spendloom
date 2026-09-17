@@ -85,7 +85,7 @@ export default function ExpensesPage({
   const [ingestions, setIngestions] = useState<Ingestion[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [selectedExpense, setSelectedExpense] = useState<Expense | null>(null);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [selectedExpenses, setSelectedExpenses] = useState<Map<string, Expense>>(new Map());
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState("");
@@ -111,9 +111,15 @@ export default function ExpensesPage({
         setItems(loadedExpenses);
         setCategories(loadedCategories);
         setIngestions(loadedIngestions);
-        setSelectedIds((current) => new Set(
-          [...current].filter((id) => loadedExpenses.some((expense) => expense.id === id)),
-        ));
+        setSelectedExpenses((current) => {
+          const next = new Map(current);
+          loadedExpenses.forEach((expense) => {
+            if (next.has(expense.id)) {
+              next.set(expense.id, expense);
+            }
+          });
+          return next;
+        });
 
         if (initialExpenseId && !initialOpened.current) {
           initialOpened.current = true;
@@ -143,19 +149,19 @@ export default function ExpensesPage({
     onChanged?.();
   };
 
-  const selectedExpenses = items.filter((item) => selectedIds.has(item.id));
-  const selectedTotal = selectedExpenses.reduce(
+  const selectedIds = new Set(selectedExpenses.keys());
+  const selectedTotal = [...selectedExpenses.values()].reduce(
     (total, item) => total + Number(item.amount || 0),
     0,
   );
 
   const toggleSelection = (expense: Expense) => {
-    setSelectedIds((current) => {
-      const next = new Set(current);
+    setSelectedExpenses((current) => {
+      const next = new Map(current);
       if (next.has(expense.id)) {
         next.delete(expense.id);
       } else {
-        next.add(expense.id);
+        next.set(expense.id, expense);
       }
       return next;
     });
@@ -166,7 +172,7 @@ export default function ExpensesPage({
     setError("");
 
     try {
-      await downloadReimbursementZip(selectedExpenses.map((expense) => expense.id));
+      await downloadReimbursementZip([...selectedExpenses.keys()]);
     } catch (downloadError) {
       setError(
         downloadError instanceof Error
@@ -200,7 +206,7 @@ export default function ExpensesPage({
           </Typography>
         </Box>
         <Stack direction="row" spacing={1} flexWrap="wrap">
-          {selectedExpenses.length > 0 && (
+          {selectedExpenses.size > 0 && (
             <Button
               onClick={downloadSelectedExpenses}
               disabled={downloading}
@@ -209,7 +215,7 @@ export default function ExpensesPage({
             >
               {downloading
                 ? "Preparing ZIP…"
-                : `Download reimbursement ZIP (${selectedExpenses.length} · ${money(selectedTotal)})`}
+                : `Download reimbursement ZIP (${selectedExpenses.size} · ${money(selectedTotal)})`}
             </Button>
           )}
           {!reviewOnly && (
@@ -344,8 +350,19 @@ export default function ExpensesPage({
               checkboxSelection
               isRowSelectable={(params) => Boolean((params.row as Expense).receipt_id)}
               rowSelectionModel={{ type: "include", ids: selectedIds }}
+              keepNonExistentRowsSelected
               onRowSelectionModelChange={(model) => {
-                setSelectedIds(new Set(Array.from(model.ids, String)));
+                setSelectedExpenses((current) => {
+                  const next = new Map(current);
+                  items.forEach((expense) => {
+                    if (model.ids.has(expense.id)) {
+                      next.set(expense.id, expense);
+                    } else {
+                      next.delete(expense.id);
+                    }
+                  });
+                  return next;
+                });
               }}
               disableRowSelectionOnClick
               onRowClick={(params) => setSelectedExpense(params.row as Expense)}
