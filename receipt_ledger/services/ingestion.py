@@ -17,7 +17,7 @@ from ..models import (
     Receipt,
     uuid_str,
 )
-from .storage import InvalidReceiptFile, save_original, sha256_bytes, sniff_mime
+from .storage import InvalidReceiptFile, compress_receipt_image, save_receipt, sha256_bytes, sniff_mime
 
 
 class DuplicateReceiptDocument(InvalidReceiptFile):
@@ -146,13 +146,15 @@ def _receipt_for_bytes(
         return existing, False
 
     receipt_id = uuid_str()
-    path, clean_name = save_original(settings, receipt_id, filename, data)
+    stored_data, stored_mime = compress_receipt_image(data, mime)
+    stored_filename = filename if stored_mime == mime else f"{Path(filename).stem[:170]}.webp"
+    path, clean_name = save_receipt(settings, receipt_id, stored_filename, stored_data)
     receipt = Receipt(
         id=receipt_id,
         sha256=digest,
         original_filename=clean_name,
-        mime_type=mime,
-        size_bytes=len(data),
+        mime_type=stored_mime,
+        size_bytes=len(stored_data),
         storage_path=path,
     )
     db.add(receipt)

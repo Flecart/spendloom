@@ -66,7 +66,9 @@ export default function ReceiptDocumentsPanel({
               {index + 1}. {document.filename}
             </span>
             <span className="receipt-document-size">
-              {(document.size_bytes / 1024 / 1024).toFixed(1)} MB
+              {document.size_bytes < 1024 * 1024
+                ? `${Math.round(document.size_bytes / 1024)} KB`
+                : `${(document.size_bytes / 1024 / 1024).toFixed(1)} MB`}
             </span>
           </Button>
         ))}
@@ -77,7 +79,7 @@ export default function ReceiptDocumentsPanel({
         rel="noreferrer"
         startIcon={<OpenInNewRounded />}
       >
-        Open selected original
+        Open selected file
       </Button>
     </Stack>
   );

@@ -1,6 +1,6 @@
 # Spendloom architecture
 
-Spendloom is deliberately a small distributed system: three processes share one database and one receipt directory. Separating receipt intake from AI processing keeps uploads fast and makes the original document durable before any slow or unreliable external call begins.
+Spendloom is deliberately a small distributed system: three processes share one database and one receipt directory. Separating receipt intake from AI processing keeps uploads fast and makes the stored document durable before any slow or unreliable external call begins.
 
 ## System map
 
@@ -10,9 +10,9 @@ flowchart LR
     TGUser[Telegram account] --> TG[Telegram Bot API]
     TG -->|long polling and file download| Bot[Telegram bot service]
 
-    Web -->|save original + queue row| DB[(SQLite)]
+    Web -->|save receipt + queue row| DB[(SQLite)]
     Web --> Files[(Receipt files)]
-    Bot -->|save original + queue row| DB
+    Bot -->|save receipt + queue row| DB
     Bot --> Files
 
     Worker[Background worker] -->|claim queued ingestion| DB
@@ -54,7 +54,7 @@ The intake service:
 1. Checks the source message ID for idempotency.
 2. Enforces the size limit and identifies the real MIME type from the bytes.
 3. Calculates a SHA-256 digest for exact duplicate detection.
-4. Writes the original atomically under `data/receipts/<year>/<month>/<receipt-id>/`.
+4. Compresses receipt images to WebP when this reduces their size, then writes the stored file atomically under `data/receipts/<year>/<month>/<receipt-id>/`. PDFs remain unchanged.
 5. Creates a `receipts` row and a queued `ingestions` row in one database transaction.
 
 Telegram receives its “saved and queued” acknowledgement only after those steps complete. An AI outage therefore cannot lose an uploaded document.
@@ -67,9 +67,9 @@ The worker marks the ingestion as processing and prepares model-friendly input:
 
 - Images are orientation-corrected, converted to JPEG, and resized to a bounded resolution.
 - PDFs are rendered to page images with Poppler. Embedded text is also extracted when available.
-- A smaller first-page/image preview is stored under `data/previews/`.
+- PDF pages and larger images get a preview under `data/previews/`; compact WebP receipts use the stored file directly.
 
-The original is never replaced by the normalized model input.
+The model input and preview are generated from the stored receipt file. Uploaded image bytes are not retained after compression.
 
 ### 3. Structured AI extraction
 
@@ -130,7 +130,7 @@ The main records have different responsibilities:
 
 | Record | Purpose |
 | --- | --- |
-| `Receipt` | Immutable original file metadata, digest, and preview location. |
+| `Receipt` | Stored file metadata, uploaded-file digest, and preview location. |
 | `Ingestion` | One delivery attempt from web or Telegram, including queue state, retry information, and raw extraction. |
 | `Expense` | Editable accounting interpretation of a receipt. |
 | `Category` | Personal/business classification and optional QuickBooks mapping. |
@@ -152,9 +152,9 @@ A receipt can have multiple ingestion records—for example, if the same file is
 The system treats storage, extraction, and accounting as separate stages:
 
 - Invalid files are rejected before a queue record is created.
-- Exact repeated files become duplicate ingestions rather than duplicate stored originals.
+- Exact repeated uploads become duplicate ingestions rather than duplicate stored files.
 - Provider and transient processing errors retry up to three times.
-- Permanently failed ingestions remain visible with their error, while their originals remain stored.
+- Permanently failed ingestions remain visible with their error, while their stored files remain available.
 - A missing AI key creates a manual-review record instead of failing the upload.
 - Telegram update offsets and source message IDs prevent normal polling retries from duplicating work.
 

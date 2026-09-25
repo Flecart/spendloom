@@ -1,6 +1,6 @@
 # Spendloom
 
-Spendloom is a private, self-hosted receipt inbox and spending companion for one person. Send a receipt from the web or Telegram, keep the original locally, and turn it into a reviewable expense without giving a cloud service access to your whole ledger.
+Spendloom is a private, self-hosted receipt inbox and spending companion for one person. Send a receipt from the web or Telegram, store a compact local copy, and turn it into a reviewable expense without giving a cloud service access to your whole ledger.
 
 ![Spendloom woven-receipt social art](assets/spendloom-social.png)
 

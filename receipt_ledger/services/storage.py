@@ -46,7 +46,7 @@ def sniff_mime(data: bytes, claimed: str | None, filename: str) -> str:
     raise InvalidReceiptFile("The file is not a supported image or PDF")
 
 
-def save_original(settings: Settings, receipt_id: str, filename: str, data: bytes) -> tuple[str, str]:
+def save_receipt(settings: Settings, receipt_id: str, filename: str, data: bytes) -> tuple[str, str]:
     now = datetime.now(timezone.utc)
     folder = settings.receipts_dir / f"{now:%Y}" / f"{now:%m}" / receipt_id
     folder.mkdir(parents=True, exist_ok=True)
@@ -67,6 +67,38 @@ def save_original(settings: Settings, receipt_id: str, filename: str, data: byte
 
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def compress_receipt_image(data: bytes, mime_type: str) -> tuple[bytes, str]:
+    if mime_type not in ALLOWED_IMAGE_MIMES or len(data) < 20_000:
+        return data, mime_type
+
+    try:
+        with Image.open(io.BytesIO(data)) as source:
+            image = ImageOps.exif_transpose(source)
+            if "A" in image.getbands() or "transparency" in image.info:
+                image = image.convert("RGBA")
+                background = Image.new("RGB", image.size, "white")
+                background.paste(image, mask=image.getchannel("A"))
+                image = background
+            else:
+                image = image.convert("RGB")
+    except (OSError, ValueError) as exc:
+        raise InvalidReceiptFile("Unable to read receipt image") from exc
+
+    best = data
+    for max_side, quality in ((1600, 40), (1400, 32), (1200, 28), (1000, 25)):
+        reduced = image.copy()
+        legible_side = max(max_side, round(max(image.size) * min(1, 600 / min(image.size))))
+        reduced.thumbnail((legible_side, legible_side), Image.Resampling.LANCZOS)
+        output = io.BytesIO()
+        reduced.save(output, format="WEBP", quality=quality, method=6)
+        candidate = output.getvalue()
+        if len(candidate) < len(best):
+            best = candidate
+        if len(best) <= len(data) // 10:
+            break
+    return (best, "image/webp") if best is not data else (data, mime_type)
 
 
 def prepare_visuals(settings: Settings, receipt_id: str, storage_path: str, mime_type: str) -> tuple[list[tuple[bytes, str]], str | None, int, str]:
@@ -112,6 +144,8 @@ def prepare_visuals(settings: Settings, receipt_id: str, storage_path: str, mime
         model_buffer = io.BytesIO()
         image.save(model_buffer, format="JPEG", quality=88, optimize=True)
         pages.append((model_buffer.getvalue(), "image/jpeg"))
+        if mime_type == "image/webp" and max(image.size) <= 1600:
+            return pages, None, 1, ""
         thumb = image.copy()
         thumb.thumbnail((1000, 1000))
         thumb.save(preview, format="JPEG", quality=82, optimize=True)
