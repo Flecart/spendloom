@@ -15,7 +15,7 @@ import {
   Typography,
   useMediaQuery,
 } from "@mui/material";
-import { DownloadRounded, SearchRounded } from "@mui/icons-material";
+import { DeleteOutlineRounded, DownloadRounded, ReplayRounded, SearchRounded } from "@mui/icons-material";
 import { DataGrid, GridColDef } from "@mui/x-data-grid";
 
 import {
@@ -88,13 +88,16 @@ export default function ExpensesPage({
   const [selectedExpenses, setSelectedExpenses] = useState<Map<string, Expense>>(new Map());
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
+  const [busyIngestionId, setBusyIngestionId] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
   const [scope, setScope] = useState("");
   const [category, setCategory] = useState("");
 
-  const loadExpenses = () => {
-    setLoading(true);
+  const loadExpenses = (showLoading = true) => {
+    if (showLoading) {
+      setLoading(true);
+    }
 
     const parameters = new URLSearchParams();
     if (reviewOnly) parameters.set("state", "review");
@@ -144,6 +147,14 @@ export default function ExpensesPage({
     return () => clearTimeout(timer);
   }, [reviewOnly, search, scope, category]);
 
+  useEffect(() => {
+    if (!reviewOnly || !ingestions.some((item) => ["queued", "processing"].includes(item.status))) {
+      return;
+    }
+    const timer = window.setInterval(() => loadExpenses(false), 5000);
+    return () => window.clearInterval(timer);
+  }, [reviewOnly, ingestions, search, scope, category]);
+
   const handleChanged = () => {
     loadExpenses();
     onChanged?.();
@@ -181,6 +192,26 @@ export default function ExpensesPage({
       );
     } finally {
       setDownloading(false);
+    }
+  };
+
+  const handleFailedIngestion = async (ingestion: Ingestion, action: "retry" | "delete") => {
+    if (action === "delete" && !window.confirm("Delete this failed attempt from the review inbox? The original receipt will remain stored.")) {
+      return;
+    }
+
+    setBusyIngestionId(ingestion.id);
+    setError("");
+    try {
+      await api<void>(
+        `/api/ingestions/${ingestion.id}${action === "retry" ? "/retry" : ""}`,
+        { method: action === "retry" ? "POST" : "DELETE" },
+      );
+      handleChanged();
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : "Unable to update receipt attempt.");
+    } finally {
+      setBusyIngestionId(null);
     }
   };
 
@@ -281,7 +312,31 @@ export default function ExpensesPage({
       {error && <Alert severity="error">{error}</Alert>}
 
       {reviewOnly && reviewIngestions.map((ingestion) => (
-        <Alert key={ingestion.id} severity={ingestion.status === "failed" ? "error" : "info"}>
+        <Alert
+          key={ingestion.id}
+          severity={ingestion.status === "failed" ? "error" : "info"}
+          action={ingestion.status === "failed" ? (
+            <Stack direction="row" spacing={1}>
+              <Button
+                size="small"
+                startIcon={<ReplayRounded />}
+                disabled={busyIngestionId !== null}
+                onClick={() => handleFailedIngestion(ingestion, "retry")}
+              >
+                Retry
+              </Button>
+              <Button
+                size="small"
+                color="error"
+                startIcon={<DeleteOutlineRounded />}
+                disabled={busyIngestionId !== null}
+                onClick={() => handleFailedIngestion(ingestion, "delete")}
+              >
+                Delete
+              </Button>
+            </Stack>
+          ) : undefined}
+        >
           <strong>{ingestion.status === "failed" ? "Import failed" : "Receipt processing"}</strong>
           {` · ${ingestion.source} · ${new Date(ingestion.received_at).toLocaleString()} · ${ingestion.id.slice(0, 8)}`}
           {ingestion.error_message ? ` — ${ingestion.error_message}` : ""}
@@ -292,7 +347,7 @@ export default function ExpensesPage({
         <Box sx={{ display: "grid", placeItems: "center", height: 280 }}>
           <CircularProgress />
         </Box>
-      ) : items.length === 0 ? (
+      ) : items.length === 0 && reviewIngestions.length === 0 ? (
         <Card>
           <Box className="empty-state">
             <Typography variant="h6">
@@ -305,7 +360,7 @@ export default function ExpensesPage({
             </Typography>
           </Box>
         </Card>
-      ) : mobile ? (
+      ) : items.length === 0 ? null : mobile ? (
         <Stack spacing={1.5}>
           {items.map((expense) => (
             <Card key={expense.id} onClick={() => setSelectedExpense(expense)}>

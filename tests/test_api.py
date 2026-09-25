@@ -6,17 +6,18 @@ from decimal import Decimal
 from pathlib import Path
 
 from PIL import Image
+import pytest
 from sqlalchemy import select
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from receipt_ledger.api import RAMP_HEADERS, export_csv, export_reimbursement_zip, startup, update_expense
+from receipt_ledger.api import RAMP_HEADERS, delete_failed_ingestion, export_csv, export_reimbursement_zip, retry_ingestion, startup, update_expense
 from receipt_ledger.config import get_settings
 from receipt_ledger.database import SessionLocal
 from receipt_ledger.models import Category, Expense, IngestionStatus
 from receipt_ledger.schemas import ExpenseUpdate, ReimbursementExportRequest
 from receipt_ledger.services.ingestion import ingest_bytes
-from receipt_ledger.services.processing import process_next
+from receipt_ledger.services.processing import process_ingestion, process_next
 
 
 def jpeg(color: str = "white") -> bytes:
@@ -88,6 +89,52 @@ def test_duplicate_file_is_flagged() -> None:
         second = ingest_bytes(db, get_settings(), data=payload, filename="two.jpg", claimed_mime="image/jpeg", source="web", external_id="duplicate-b")
         assert first.status == IngestionStatus.queued
         assert second.status == IngestionStatus.duplicate
+
+
+def test_failed_receipt_can_be_retried_or_removed_from_inbox() -> None:
+    startup()
+    with SessionLocal() as db:
+        ingestion = ingest_bytes(
+            db, get_settings(), data=jpeg("#123456"), filename="failed.jpg",
+            claimed_mime="image/jpeg", source="web", external_id="failed-actions",
+        )
+        with pytest.raises(HTTPException) as error:
+            delete_failed_ingestion(ingestion.id, None, db)
+        assert error.value.status_code == 409
+
+        ingestion.status = IngestionStatus.failed
+        ingestion.attempts = 3
+        ingestion.error_code = "processing_error"
+        ingestion.error_message = "Temporary error"
+        db.commit()
+        original_path = ingestion.receipt.storage_path
+
+        retried = retry_ingestion(ingestion.id, None, db)
+        assert retried.status == IngestionStatus.queued
+        assert retried.attempts == 0
+        assert retried.error_code is None
+        assert retried.error_message is None
+        assert Path(original_path).exists()
+        process_ingestion(db, get_settings(), ingestion.id)
+        db.refresh(ingestion)
+        assert ingestion.status == IngestionStatus.needs_review
+
+        discarded = ingest_bytes(
+            db, get_settings(), data=jpeg("#654321"), filename="discarded.jpg",
+            claimed_mime="image/jpeg", source="web", external_id="failed-discard",
+        )
+        discarded_path = discarded.receipt.storage_path
+        discarded.status = IngestionStatus.failed
+        db.commit()
+        assert delete_failed_ingestion(discarded.id, None, db).status_code == 204
+        assert discarded.status == IngestionStatus.cancelled
+        assert Path(discarded_path).exists()
+        with pytest.raises(HTTPException) as error:
+            retry_ingestion(discarded.id, None, db)
+        assert error.value.status_code == 409
+        with pytest.raises(HTTPException) as error:
+            retry_ingestion("missing-ingestion", None, db)
+        assert error.value.status_code == 404
 
 
 def test_reimbursement_zip_contains_only_selected_receipts_and_totals() -> None:

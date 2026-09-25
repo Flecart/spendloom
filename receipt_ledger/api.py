@@ -326,6 +326,34 @@ def list_ingestions(
     return list(db.scalars(query.order_by(Ingestion.received_at.desc()).limit(limit)).all())
 
 
+@app.post("/api/ingestions/{ingestion_id}/retry", response_model=IngestionOut)
+def retry_ingestion(ingestion_id: str, _auth: Auth, db: Db) -> Ingestion:
+    ingestion = db.get(Ingestion, ingestion_id)
+    if not ingestion:
+        raise HTTPException(status_code=404, detail="Receipt attempt not found")
+    if ingestion.status != IngestionStatus.failed or ingestion.expense_id:
+        raise HTTPException(status_code=409, detail="Only failed receipt attempts without an expense can be retried")
+    ingestion.attempts = 0
+    ingestion.error_code = None
+    ingestion.error_message = None
+    ingestion.raw_extraction = None
+    db.add(AuditEvent(entity_type="ingestion", entity_id=ingestion.id, action="retried"))
+    return schedule_ingestion(db, ingestion, ready_at=datetime.now(timezone.utc))
+
+
+@app.delete("/api/ingestions/{ingestion_id}", status_code=204)
+def delete_failed_ingestion(ingestion_id: str, _auth: Auth, db: Db) -> Response:
+    ingestion = db.get(Ingestion, ingestion_id)
+    if not ingestion:
+        raise HTTPException(status_code=404, detail="Receipt attempt not found")
+    if ingestion.status != IngestionStatus.failed:
+        raise HTTPException(status_code=409, detail="Only failed receipt attempts can be deleted")
+    ingestion.status = IngestionStatus.cancelled
+    db.add(AuditEvent(entity_type="ingestion", entity_id=ingestion.id, action="cancelled"))
+    db.commit()
+    return Response(status_code=204)
+
+
 def _expense_query(
     state: str | None,
     scope: str | None,
