@@ -263,6 +263,8 @@ class DashboardOut(BaseModel):
     receipt_count: int
     by_category: list[dict]
     by_month: list[dict]
+    by_period: list[dict]
+    trend_granularity: Literal["day", "week"]
     top_merchants: list[dict]
 
 

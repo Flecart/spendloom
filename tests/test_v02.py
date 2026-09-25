@@ -61,6 +61,30 @@ def test_dashboard_uses_inclusive_custom_range() -> None:
         assert old.date_from == date(2025, 7, 1)
 
 
+def test_dashboard_breaks_spending_into_days_and_weeks() -> None:
+    startup()
+    with SessionLocal() as db:
+        first = _expense(db, date(2031, 7, 1), "10")
+        _expense(db, date(2031, 7, 3), "5")
+        _expense(db, date(2031, 7, 8), "20")
+
+        daily = dashboard(None, db, scope="personal", date_from=date(2031, 7, 1), date_to=date(2031, 7, 10))
+        assert daily.trend_granularity == "day"
+        assert {point["date"]: point["amount"] for point in daily.by_period} == {
+            **{f"2031-07-{day:02d}": 0.0 for day in range(1, 11)},
+            "2031-07-01": 10.0,
+            "2031-07-03": 5.0,
+            "2031-07-08": 20.0,
+        }
+        assert daily.by_category[0]["id"] == first.category_id
+
+        weekly = dashboard(None, db, scope="personal", date_from=date(2031, 7, 1), date_to=date(2031, 8, 31))
+        assert weekly.trend_granularity == "week"
+        assert weekly.by_period[0] == {"date": "2031-06-30", "amount": 15.0}
+        assert weekly.by_period[1] == {"date": "2031-07-07", "amount": 20.0}
+        assert sum(point["amount"] for point in weekly.by_period) == 35.0
+
+
 def test_chat_history_is_bounded_and_delete_needs_one_use_confirmation() -> None:
     startup()
     with SessionLocal() as db:

@@ -788,20 +788,41 @@ def dashboard(
     failed_count = db.scalar(select(func.count()).select_from(Ingestion).where(Ingestion.status == IngestionStatus.failed, func.date(Ingestion.received_at) >= date_from, func.date(Ingestion.received_at) <= date_to)) or 0
     receipt_count = db.scalar(select(func.count()).select_from(Receipt).where(func.date(Receipt.created_at) >= date_from, func.date(Receipt.created_at) <= date_to)) or 0
     category_rows = db.execute(
-        select(Category.name, Category.color, func.sum(Expense.amount)).join(Expense, Expense.category_id == Category.id).where(*range_base).group_by(Category.id).order_by(func.sum(Expense.amount).desc())
+        select(Category.id, Category.name, Category.color, func.sum(Expense.amount)).join(Expense, Expense.category_id == Category.id).where(*range_base).group_by(Category.id).order_by(func.sum(Expense.amount).desc())
     ).all()
     merchant_rows = db.execute(
         select(Expense.merchant, func.sum(Expense.amount)).where(*range_base).group_by(Expense.merchant).order_by(func.sum(Expense.amount).desc()).limit(8)
     ).all()
+    daily_totals = {
+        day: Decimal(total or 0)
+        for day, total in db.execute(
+            select(Expense.expense_date, func.sum(Expense.amount))
+            .where(*range_base)
+            .group_by(Expense.expense_date)
+        )
+    }
+    monthly_totals: dict[str, Decimal] = defaultdict(Decimal)
+    weekly_totals: dict[date, Decimal] = defaultdict(Decimal)
+    for day, amount in daily_totals.items():
+        monthly_totals[day.strftime("%Y-%m")] += amount
+        weekly_totals[day - timedelta(days=day.weekday())] += amount
     by_month = []
     cursor = date_from.replace(day=1)
     while cursor <= date_to:
-        next_month = _next_month(cursor)
-        period_start = max(cursor, date_from)
-        period_end = min(next_month - timedelta(days=1), date_to)
-        total = db.scalar(select(func.coalesce(func.sum(Expense.amount), 0)).where(*base, Expense.expense_date >= period_start, Expense.expense_date <= period_end)) or 0
-        by_month.append({"month": cursor.strftime("%Y-%m"), "amount": float(total)})
-        cursor = next_month
+        month = cursor.strftime("%Y-%m")
+        by_month.append({"month": month, "amount": float(monthly_totals[month])})
+        cursor = _next_month(cursor)
+    trend_granularity = "day" if (date_to - date_from).days <= 45 else "week"
+    step = timedelta(days=1 if trend_granularity == "day" else 7)
+    cursor = date_from if trend_granularity == "day" else date_from - timedelta(days=date_from.weekday())
+    if trend_granularity == "week" and (date_to - date_from).days > 366 * 5:
+        first_expense_date = min(daily_totals, default=date_to)
+        cursor = max(cursor, first_expense_date - timedelta(days=first_expense_date.weekday()))
+    trend_totals = daily_totals if trend_granularity == "day" else weekly_totals
+    by_period = []
+    while cursor <= date_to:
+        by_period.append({"date": cursor.isoformat(), "amount": float(trend_totals.get(cursor, 0))})
+        cursor += step
     return DashboardOut(
         month_total=Decimal(range_total),
         previous_month_total=Decimal(previous_total),
@@ -812,8 +833,10 @@ def dashboard(
         review_count=review_count,
         failed_count=failed_count,
         receipt_count=receipt_count,
-        by_category=[{"name": name, "color": color, "amount": float(total or 0)} for name, color, total in category_rows],
+        by_category=[{"id": category_id, "name": name, "color": color, "amount": float(total or 0)} for category_id, name, color, total in category_rows],
         by_month=by_month,
+        by_period=by_period,
+        trend_granularity=trend_granularity,
         top_merchants=[{"merchant": name or "Unknown", "amount": float(total or 0)} for name, total in merchant_rows],
     )
 

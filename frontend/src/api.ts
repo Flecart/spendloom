@@ -58,7 +58,22 @@ export interface Expense {
 export interface Category { id: string; code: string; name: string; scope: Scope; color: string; icon: string; quickbooks_category: string | null; archived: boolean; }
 export interface PaymentMethod { id: string; name: string; method_type: string; last_four: string | null; is_default: boolean; archived: boolean; }
 export interface MerchantRule { id: string; merchant_display: string; merchant_normalized: string; category_id: string | null; category_name: string | null; payment_method_id: string | null; payment_method_name: string | null; scope: Scope | null; enabled: boolean; conflict_count: number; }
-export interface Dashboard { month_total: string; previous_month_total: string; range_total: string; previous_range_total: string; date_from: string; date_to: string; review_count: number; failed_count: number; receipt_count: number; by_category: {name: string; color: string; amount: number}[]; by_month: {month: string; amount: number}[]; top_merchants: {merchant: string; amount: number}[]; }
+export interface Dashboard {
+  month_total: string;
+  previous_month_total: string;
+  range_total: string;
+  previous_range_total: string;
+  date_from: string;
+  date_to: string;
+  review_count: number;
+  failed_count: number;
+  receipt_count: number;
+  by_category: { id: string; name: string; color: string; amount: number }[];
+  by_month: { month: string; amount: number }[];
+  by_period: { date: string; amount: number }[];
+  trend_granularity: "day" | "week";
+  top_merchants: { merchant: string; amount: number }[];
+}
 export interface AppSettings {
   owner_name: string;
   owner_email: string;
