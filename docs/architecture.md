@@ -92,7 +92,7 @@ AI extraction is not the final authority. The processing service applies determi
 4. Converts the original amount to EUR using a cached ECB rate.
 5. Checks for a semantic duplicate using date, normalized merchant, original amount, and currency.
 
-For weekends and holidays, the latest ECB rate within the prior seven days is used. `fx_rate_date` records the effective day and `fx_estimated` is true when it differs from the expense date.
+A cached rate is reused only when it is for exactly the expense date; otherwise ECB is queried. For weekends and holidays, the latest ECB rate within the prior seven days is used. If ECB is unreachable, the latest cached rate from the prior seven days is used, and the amount is left unconverted when none exists. `fx_rate_date` records the effective day and `fx_estimated` is true when it differs from the expense date.
 
 ### 5. Review or automatic acceptance
 
