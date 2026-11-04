@@ -11,13 +11,16 @@ Snap a receipt from the web or Telegram, keep a compact copy on your own disk, a
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)
 ![Self-hosted](https://img.shields.io/badge/deploy-Docker%20Compose-2496ED.svg)
 
-![Spendloom woven-receipt social art](assets/spendloom-social.png)
+![Spendloom overview dashboard with spending trend, category breakdown, and top merchants](assets/screenshots/dashboard.png)
+
+<sub>All screenshots show synthetic demo data.</sub>
 
 </div>
 
 ## Contents
 
 - [Features](#features)
+- [Screenshots](#screenshots)
 - [Quick start](#quick-start)
 - [Configuration](#configuration)
 - [AI providers](#ai-providers)
@@ -31,8 +34,6 @@ Snap a receipt from the web or Telegram, keep a compact copy on your own disk, a
 - [Contributing, support, and license](#contributing-support-and-license)
 
 ## Features
-
-![Synthetic Spendloom dashboard](assets/spendloom-dashboard-demo.png)
 
 **Capture**
 - Upload JPEG, PNG, WebP, HEIC, and PDF receipts from the web app or Telegram.
@@ -57,6 +58,22 @@ Snap a receipt from the web or Telegram, keep a compact copy on your own disk, a
 **Own your data**
 - Everything lives in a local SQLite database and receipt directory on your machine.
 - If no AI credential is configured, receipts are still stored safely and wait for manual review.
+
+## Screenshots
+
+<table>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/expenses.png" alt="Expense ledger with category, scope, payment method, and review status"><br><b>Ledger</b>: search and filter every expense, total a selection, and export CSV.</td>
+    <td width="50%"><img src="assets/screenshots/expense-detail.png" alt="Expense editor showing the stored receipt next to the extracted fields"><br><b>Review</b>: check the extracted fields against the stored receipt, then accept.</td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="assets/screenshots/recurring.png" alt="Recurring schedules with due and upcoming occurrences"><br><b>Recurring</b>: reminders for rent, subscriptions, and salary, recorded only once you confirm.</td>
+    <td width="50%"><img src="assets/screenshots/invoices.png" alt="Invoice register showing unpaid and overdue invoices"><br><b>Receivables</b>: track issued invoices and apply partial or full payments.</td>
+  </tr>
+  <tr>
+    <td colspan="2"><img src="assets/screenshots/dashboard-dark.png" alt="Overview dashboard in dark theme"><br><b>Dark theme</b>: switch from the sidebar.</td>
+  </tr>
+</table>
 
 ## Quick start
 
