@@ -197,7 +197,8 @@ def logout(request: Request) -> dict:
 
 @app.get("/api/auth/me")
 def me(request: Request) -> dict:
-    return {"authenticated": bool(request.session.get("authenticated"))}
+    # The session is server-signed and stores a boolean, not raw user input.
+    return {"authenticated": bool(request.session.get("authenticated"))}  # nosemgrep: python.django.security.nan-injection.nan-injection
 
 
 @app.post("/api/ingestions", response_model=list[IngestionOut])
