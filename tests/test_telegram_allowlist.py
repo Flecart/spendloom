@@ -60,3 +60,62 @@ def test_failed_update_notifies_chat_and_advances_offset() -> None:
 
     assert saved_offsets == [13]
     assert bot.messages == [(99, "Sorry — Spendloom hit an error while handling that message. Please try again.")]
+
+
+class FlakyTelegramClient:
+    """Fake httpx client: fails the first `failures` getFile calls with a timeout."""
+
+    def __init__(self, failures: int) -> None:
+        self.failures = failures
+        self.calls: list[str] = []
+
+    def post(self, url: str, **_kwargs):
+        import httpx
+
+        self.calls.append(url)
+        if self.failures > 0:
+            self.failures -= 1
+            raise httpx.ReadTimeout("The read operation timed out")
+        return httpx.Response(
+            200,
+            json={"ok": True, "result": {"file_path": "photos/receipt.jpg"}},
+            request=httpx.Request("POST", url),
+        )
+
+    def get(self, url: str, **_kwargs):
+        import httpx
+
+        self.calls.append(url)
+        return httpx.Response(200, content=b"receipt-bytes", request=httpx.Request("GET", url))
+
+
+def make_download_bot(failures: int) -> TelegramBot:
+    bot = make_bot("42")
+    bot.base_url = "https://telegram.test/bot"
+    bot.file_url = "https://telegram.test/file/bot"
+    bot.client = FlakyTelegramClient(failures)
+    bot.FILE_FETCH_RETRY_DELAYS = (0, 0)
+    return bot
+
+
+def test_file_download_retries_transient_timeouts() -> None:
+    bot = make_download_bot(failures=2)
+
+    assert bot.download_file("abc") == b"receipt-bytes"
+    assert bot.client.calls == [
+        "https://telegram.test/bot/getFile",
+        "https://telegram.test/bot/getFile",
+        "https://telegram.test/bot/getFile",
+        "https://telegram.test/file/bot/photos/receipt.jpg",
+    ]
+
+
+def test_file_download_gives_up_after_last_attempt() -> None:
+    import httpx
+    import pytest
+
+    bot = make_download_bot(failures=3)
+
+    with pytest.raises(httpx.ReadTimeout):
+        bot.download_file("abc")
+    assert len(bot.client.calls) == 3

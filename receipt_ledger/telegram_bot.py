@@ -63,13 +63,48 @@ class TelegramBot:
         self.file_url = f"https://api.telegram.org/file/bot{self.settings.telegram_bot_token}"
         self.client = httpx.Client(timeout=httpx.Timeout(45, connect=15))
 
-    def api(self, method: str, payload: dict | None = None) -> dict:
-        response = self.client.post(f"{self.base_url}/{method}", json=payload or {})
+    # Fetching an attachment is a short request, so it gets a tighter timeout
+    # than long polling and is retried: a brief network drop must not lose a
+    # receipt the user already sent.
+    FILE_FETCH_TIMEOUT = httpx.Timeout(20, connect=10)
+    FILE_FETCH_RETRY_DELAYS: tuple[float, ...] = (2, 5)
+
+    def api(self, method: str, payload: dict | None = None, timeout: httpx.Timeout | None = None) -> dict:
+        if timeout is None:
+            response = self.client.post(f"{self.base_url}/{method}", json=payload or {})
+        else:
+            response = self.client.post(f"{self.base_url}/{method}", json=payload or {}, timeout=timeout)
         response.raise_for_status()
         body = response.json()
         if not body.get("ok"):
             raise RuntimeError(f"Telegram method {method} failed")
         return body["result"]
+
+    def download_file(self, file_id: str) -> bytes:
+        """Resolve and download a Telegram file, retrying transient network errors."""
+        attempts = len(self.FILE_FETCH_RETRY_DELAYS) + 1
+        for attempt in range(1, attempts + 1):
+            try:
+                file_info = self.api("getFile", {"file_id": file_id}, timeout=self.FILE_FETCH_TIMEOUT)
+                response = self.client.get(
+                    f"{self.file_url}/{file_info['file_path']}",
+                    timeout=self.FILE_FETCH_TIMEOUT,
+                )
+                response.raise_for_status()
+                return response.content
+            except httpx.TransportError as exc:
+                if attempt == attempts:
+                    raise
+                delay = self.FILE_FETCH_RETRY_DELAYS[attempt - 1]
+                logger.warning(
+                    "Telegram file download failed (attempt %d/%d: %s); retrying in %ss",
+                    attempt,
+                    attempts,
+                    type(exc).__name__,
+                    delay,
+                )
+                time.sleep(delay)
+        raise AssertionError("unreachable")
 
     def send(self, chat_id: int | str, text: str, buttons: list[list[dict]] | None = None) -> None:
         """Escape model output and obey Telegram's 4096-character limit."""
@@ -410,9 +445,7 @@ class TelegramBot:
             self.send(chat_id, "Telegram bots can only download files up to 20 MB. Upload this receipt through the web app instead.")
             return
         try:
-            file_info = self.api("getFile", {"file_id": file_id})
-            response = self.client.get(f"{self.file_url}/{file_info['file_path']}", timeout=45)
-            response.raise_for_status()
+            file_bytes = self.download_file(file_id)
             external_id = f"{chat_id}:{message.get('message_id')}:{unique_id}"
             target_occurrence_id: str | None = None
             with SessionLocal() as target_db:
@@ -433,7 +466,7 @@ class TelegramBot:
                             attach_document(
                                 target_db,
                                 self.settings,
-                                data=response.content,
+                                data=file_bytes,
                                 filename=filename,
                                 claimed_mime=mime,
                                 target_type="occurrence",
@@ -448,7 +481,7 @@ class TelegramBot:
                         attach_document(
                             target_db,
                             self.settings,
-                            data=response.content,
+                            data=file_bytes,
                             filename=filename,
                             claimed_mime=mime,
                             target_type=target_type,
@@ -509,7 +542,7 @@ class TelegramBot:
                 ingestion = ingest_bytes(
                     db,
                     self.settings,
-                    data=response.content,
+                    data=file_bytes,
                     filename=filename,
                     claimed_mime=mime,
                     source="telegram",
