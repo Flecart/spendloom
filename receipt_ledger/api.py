@@ -710,7 +710,7 @@ def get_app_settings(_auth: Auth, db: Db) -> SettingsOut:
         telegram_claimed=bool(values.get("telegram_owner_id")),
         telegram_allowlist_configured=bool(settings.telegram_allowed_user_id),
         ai_provider=settings.ai_provider,
-        ai_model=settings.ai_model,
+        ai_model=settings.resolved_ai_model,
         ai_configured=_ai_configured(),
         ai_auth_label=_ai_auth_label(),
         base_currency=settings.base_currency,

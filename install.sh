@@ -36,7 +36,7 @@ APP_PASSWORD=$(ask APP_PASSWORD "Spendloom app password" "" 1)
 SESSION_SECRET=$(env_get "$ENV_FILE" SESSION_SECRET); SESSION_SECRET=${SESSION_SECRET:-$(random_secret)}
 AI_PROVIDER=$(ask AI_PROVIDER "AI provider (openai, anthropic, gemini, codex)" "openai")
 case $AI_PROVIDER in openai|anthropic|gemini|codex) ;; *) die "AI_PROVIDER must be openai, anthropic, gemini, or codex." ;; esac
-AI_MODEL=$(ask AI_MODEL "Receipt AI model" "gpt-5.6-luna")
+AI_MODEL=$(ask AI_MODEL "Receipt AI model (blank uses the provider default)" "")
 CHAT_MODEL=$(ask CHAT_MODEL "Optional chat model (blank reuses receipt model)" "")
 CODEX_AUTH_DIR=$(env_get "$ENV_FILE" CODEX_AUTH_DIR)
 CODEX_AUTH_DIR=${CODEX_AUTH_DIR:-$ROOT_DIR/.codex-auth}

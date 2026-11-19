@@ -125,7 +125,7 @@ def process_ingestion(db: Session, settings: Settings, ingestion_id: str) -> Ing
     ingestion.status = IngestionStatus.processing
     ingestion.attempts += 1
     ingestion.provider = settings.ai_provider
-    ingestion.model = settings.ai_model
+    ingestion.model = settings.resolved_ai_model
     ingestion.error_code = None
     ingestion.error_message = None
     ingestion.ready_at = None

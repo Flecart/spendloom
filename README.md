@@ -131,7 +131,7 @@ All settings live in `.env`. See [`.env.example`](.env.example) for the full ann
 | `COOKIE_SECURE` | Set to `true` when served over HTTPS. |
 | `TIMEZONE` | Used for dates and recurring reminders. |
 | `PUID`, `PGID` | Host user/group that owns the data directory (`id -u`, `id -g`). |
-| `AI_PROVIDER`, `AI_MODEL`, `CHAT_MODEL` | Extraction/chat provider and model. `CHAT_MODEL` defaults to `AI_MODEL`. |
+| `AI_PROVIDER`, `AI_MODEL`, `CHAT_MODEL` | Extraction/chat provider and model. A blank `AI_MODEL` uses the provider default; `CHAT_MODEL` defaults to `AI_MODEL`. |
 | `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` | API credential for the chosen provider. |
 | `CODEX_AUTH_DIR`, `CODEX_TIMEOUT_SECONDS` | ChatGPT sign-in storage and timeout for the `codex` provider. |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_ALLOWED_USER_ID` | Optional Telegram bot and owner allowlist. |
@@ -143,9 +143,18 @@ All settings live in `.env`. See [`.env.example`](.env.example) for the full ann
 | Provider (`AI_PROVIDER`) | Receipt extraction | Telegram tools | Authentication |
 | --- | --- | --- | --- |
 | `openai` | Structured Responses API | Function calling | `OPENAI_API_KEY` |
-| `anthropic` | JSON extraction | Tool use | `ANTHROPIC_API_KEY` |
+| `anthropic` | Structured outputs | Tool use | `ANTHROPIC_API_KEY` |
 | `gemini` | JSON extraction | Function declarations | `GEMINI_API_KEY` |
 | `codex` | Structured final output | Structured tool requests | ChatGPT sign-in via Codex CLI |
+
+Default models when `AI_MODEL` is blank: `openai` and `codex` use `gpt-5.6-luna`, `anthropic` uses `claude-haiku-5-5`. `gemini` has no default, so set `AI_MODEL` for it.
+
+To switch to Claude, set two values in `.env` and leave `AI_MODEL` blank:
+
+```dotenv
+AI_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+```
 
 Switching providers keeps local chat context. After changing `AI_PROVIDER` on an existing deployment, rebuild and recreate the worker so the running container matches the selected provider:
 

@@ -232,11 +232,14 @@ class AnthropicChatProvider(ChatProvider):
         body = messages[1:] if system else messages
         response = Anthropic(api_key=self.settings.anthropic_api_key).messages.create(
             model=self.settings.resolved_chat_model,
-            max_tokens=1_200,
+            # Thinking is on by default and counts against max_tokens.
+            max_tokens=16_000,
             system=system,
             messages=[{"role": item["role"], "content": item["content"]} for item in body],
             tools=[{"name": tool["name"], "description": tool["description"], "input_schema": tool["parameters"]} for tool in tools],
         )
+        if response.stop_reason == "refusal":
+            return ChatCompletion(text="I can't help with that request.", tool_calls=[])
         calls = [ToolCall(block.name, dict(block.input or {})) for block in response.content if getattr(block, "type", None) == "tool_use"]
         text = "\n".join(block.text for block in response.content if getattr(block, "type", None) == "text")
         return ChatCompletion(text=text.strip(), tool_calls=calls)

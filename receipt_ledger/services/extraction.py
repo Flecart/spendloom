@@ -38,7 +38,7 @@ class OpenAIProvider(ExtractionProvider):
             content.append({"type": "input_image", "image_url": f"data:{mime};base64,{encoded}"})
         client = OpenAI(api_key=self.settings.openai_api_key)
         response = client.responses.parse(
-            model=self.settings.ai_model,
+            model=self.settings.resolved_ai_model,
             input=[{"role": "user", "content": content}],
             text_format=ReceiptExtraction,
         )
@@ -59,7 +59,7 @@ Return only the structured receipt fields requested by the output schema.
         try:
             value = run_codex(
                 self.settings,
-                model=self.settings.ai_model,
+                model=self.settings.resolved_ai_model,
                 prompt=codex_prompt,
                 output_schema=ReceiptExtraction.model_json_schema(),
                 images=images,
@@ -75,14 +75,34 @@ class AnthropicProvider(ExtractionProvider):
             raise ProviderNotConfigured("ANTHROPIC_API_KEY is not configured")
         from anthropic import Anthropic
 
-        content: list[dict] = []
-        for data, mime in images:
-            content.append({"type": "image", "source": {"type": "base64", "media_type": mime, "data": base64.b64encode(data).decode("ascii")}})
-        content.append({"type": "text", "text": prompt + "\nReturn only valid JSON matching the requested schema."})
         client = Anthropic(api_key=self.settings.anthropic_api_key)
-        response = client.messages.create(model=self.settings.ai_model, max_tokens=1800, messages=[{"role": "user", "content": content}])
-        text = "\n".join(block.text for block in response.content if getattr(block, "type", None) == "text")
-        return ReceiptExtraction.model_validate(_parse_json(text))
+        response = client.messages.parse(
+            model=self.settings.resolved_ai_model,
+            max_tokens=ANTHROPIC_MAX_TOKENS,
+            messages=[{"role": "user", "content": _anthropic_content(prompt, images)}],
+            output_format=ReceiptExtraction,
+        )
+        if response.stop_reason == "refusal":
+            raise ValueError("Claude declined to extract this receipt")
+        if response.stop_reason == "max_tokens":
+            raise ValueError("Claude ran out of output tokens before finishing the extraction")
+        if response.parsed_output is None:
+            raise ValueError("Claude returned no parsed extraction")
+        return response.parsed_output
+
+
+# Thinking is on by default for current Claude models and counts against
+# max_tokens, so leave generous headroom above the small JSON answer.
+ANTHROPIC_MAX_TOKENS = 16_000
+
+
+def _anthropic_content(prompt: str, images: list[tuple[bytes, str]]) -> list[dict]:
+    content: list[dict] = []
+    for data, mime in images:
+        encoded = base64.b64encode(data).decode("ascii")
+        content.append({"type": "image", "source": {"type": "base64", "media_type": mime, "data": encoded}})
+    content.append({"type": "text", "text": prompt})
+    return content
 
 
 class GeminiProvider(ExtractionProvider):
@@ -96,7 +116,7 @@ class GeminiProvider(ExtractionProvider):
         contents: list = [prompt]
         contents.extend(types.Part.from_bytes(data=data, mime_type=mime) for data, mime in images)
         response = client.models.generate_content(
-            model=self.settings.ai_model,
+            model=self.settings.resolved_ai_model,
             contents=contents,
             config={"response_mime_type": "application/json", "response_schema": ReceiptExtraction},
         )

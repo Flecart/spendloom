@@ -3,8 +3,18 @@ from __future__ import annotations
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+# Used when AI_MODEL is unset or blank. Gemini has no default and keeps the
+# historical fallback, so set AI_MODEL explicitly for that provider.
+FALLBACK_AI_MODEL = "gpt-5.6-luna"
+DEFAULT_AI_MODELS = {
+    "openai": FALLBACK_AI_MODEL,
+    "codex": FALLBACK_AI_MODEL,
+    "anthropic": "claude-haiku-5-5",
+}
 
 
 class Settings(BaseSettings):
@@ -26,7 +36,7 @@ class Settings(BaseSettings):
     confidence_threshold: float = 0.88
 
     ai_provider: str = "openai"
-    ai_model: str = "gpt-5.6-luna"
+    ai_model: str | None = None
     chat_model: str | None = None
     openai_api_key: str | None = None
     anthropic_api_key: str | None = None
@@ -48,6 +58,19 @@ class Settings(BaseSettings):
 
     cookie_secure: bool = False
     log_level: str = "INFO"
+
+    @field_validator("ai_model", "chat_model", mode="before")
+    @classmethod
+    def blank_model_is_unset(cls, value: object) -> object:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
+    @property
+    def resolved_ai_model(self) -> str:
+        if self.ai_model:
+            return self.ai_model
+        return DEFAULT_AI_MODELS.get(self.ai_provider.lower(), FALLBACK_AI_MODEL)
 
     @property
     def resolved_database_url(self) -> str:
@@ -77,7 +100,7 @@ class Settings(BaseSettings):
 
     @property
     def resolved_chat_model(self) -> str:
-        return self.chat_model or self.ai_model
+        return self.chat_model or self.resolved_ai_model
 
 
 @lru_cache
